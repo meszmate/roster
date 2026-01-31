@@ -29,12 +29,27 @@ const (
 	DialogPassword
 	DialogSettings
 	DialogContextHelp
+	DialogRegister
+	DialogRegisterForm
+	DialogRegisterSuccess
+)
+
+// DialogAction represents what action triggered the dialog result
+type DialogAction int
+
+const (
+	ActionConfirm DialogAction = iota
+	ActionCancel
+	ActionViewCaptcha
+	ActionCopyURL
 )
 
 // DialogResult is sent when a dialog is closed
 type DialogResult struct {
 	Type      DialogType
 	Confirmed bool
+	Button    int // Index of the button that was pressed
+	Action    DialogAction
 	Values    map[string]string
 }
 
@@ -60,6 +75,7 @@ type DialogInput struct {
 	Value    string
 	Cursor   int
 	Password bool
+	ReadOnly bool // If true, field is not editable (for display only)
 }
 
 // New creates a new dialog model
@@ -211,6 +227,7 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	// Add command summaries
 	cmdList := []string{
 		"connect <jid> <pass> [server] [port]",
+		"register [server] [port] - Register new account",
 		"account add    - Add saved account",
 		"disconnect     - Disconnect",
 		"1-20           - Switch window",
@@ -378,11 +395,327 @@ func (m Model) ShowContextHelp(context string, content string) Model {
 	return m
 }
 
+// RegistrationField represents a field in the registration form
+type RegistrationField struct {
+	Name     string
+	Label    string
+	Required bool
+	Password bool
+	Type     string // text-single, text-private, hidden, etc.
+	Value    string // Pre-filled or default value
+}
+
+// CaptchaInfo holds CAPTCHA display information
+type CaptchaInfo struct {
+	Type      string   // "image", "audio", "video", "qa", "hashcash"
+	Challenge string   // Challenge type (ocr, audio_recog, etc.)
+	MimeType  string
+	Data      []byte   // Raw media data
+	URLs      []string // All available URLs
+	URL       string   // Primary URL to fetch from
+	Question  string   // For QA type or challenge description
+	FieldVar  string   // Field var for answer submission
+}
+
+// ShowRegister shows the server input dialog for registration
+func (m Model) ShowRegister() Model {
+	m.dialogType = DialogRegister
+	m.title = "Register Account"
+	m.message = "Enter the server to register on"
+	m.inputs = []DialogInput{
+		{Label: "Server (e.g., example.com)", Key: "server", Value: ""},
+		{Label: "Port (default: 5222)", Key: "port", Value: ""},
+	}
+	m.activeInput = 0
+	m.buttons = []string{"Fetch Form", "Cancel"}
+	m.activeBtn = 0
+	return m
+}
+
+// ShowRegisterForm shows the registration form with dynamic fields
+func (m Model) ShowRegisterForm(server string, port int, fields []RegistrationField, instructions string, isDataForm bool, formType string, captcha *CaptchaInfo) Model {
+	m.dialogType = DialogRegisterForm
+	m.title = "Register on " + server
+
+	// Build message with CAPTCHA info if present
+	message := instructions
+	if captcha != nil {
+		message += formatCaptchaInfo(captcha)
+	}
+	m.message = message
+
+	// Separate visible fields from hidden fields
+	var visibleInputs []DialogInput
+
+	// Add read-only CAPTCHA viewer field if media CAPTCHA is present
+	if captcha != nil && (captcha.Type == "image" || captcha.Type == "audio" || captcha.Type == "video") {
+		label := "Open CAPTCHA"
+		switch captcha.Type {
+		case "audio":
+			label = "Play Audio"
+		case "video":
+			label = "Play Video"
+		}
+		// Show available actions based on what's available
+		hasURL := captcha.URL != "" && !strings.HasPrefix(captcha.URL, "cid:")
+		hasData := len(captcha.Data) > 0
+		var value string
+		if hasURL && hasData {
+			value = "[ V: Open | C: Copy URL ]"
+		} else if hasURL {
+			value = "[ V: Open | C: Copy URL ]"
+		} else if hasData {
+			value = "[ V: Open ]"
+		} else {
+			value = "[ V: Open ]"
+		}
+		visibleInputs = append(visibleInputs, DialogInput{
+			Label:    label,
+			Key:      "_captcha_viewer",
+			Value:    value,
+			ReadOnly: true,
+		})
+	}
+
+	for _, f := range fields {
+		// Store field type for later use in submission
+		if f.Type != "" {
+			m.data["_type_"+f.Name] = f.Type
+		}
+
+		if f.Type == "hidden" {
+			// Store hidden fields in data map
+			m.data["_hidden_"+f.Name] = f.Value
+		} else if f.Type == "fixed" {
+			// Fixed fields are just display text, don't show as input
+			continue
+		} else {
+			// Check if this is a CAPTCHA answer field
+			fieldLower := strings.ToLower(f.Name)
+			isCaptchaAnswerField := fieldLower == "ocr" || fieldLower == "captcha" || fieldLower == "qa" ||
+				strings.Contains(fieldLower, "captcha") ||
+				fieldLower == "audio_recog" || fieldLower == "video_recog" ||
+				fieldLower == "picture_recog" || fieldLower == "picture_q" ||
+				fieldLower == "speech_q" || fieldLower == "speech_recog" || fieldLower == "video_q"
+
+			// Skip fields that just display the URL (already shown in message)
+			if strings.HasPrefix(f.Label, "http://") || strings.HasPrefix(f.Label, "https://") {
+				continue
+			}
+			if strings.HasPrefix(f.Value, "http://") || strings.HasPrefix(f.Value, "https://") {
+				// This is a URL display field, skip it
+				continue
+			}
+
+			// For CAPTCHA answer fields, use a clear label
+			label := f.Label
+			if isCaptchaAnswerField && label == "" {
+				label = "CAPTCHA Answer"
+			}
+
+			visibleInputs = append(visibleInputs, DialogInput{
+				Label:    label,
+				Key:      f.Name,
+				Value:    f.Value, // Pre-fill with default value
+				Password: f.Password,
+			})
+		}
+	}
+	m.inputs = visibleInputs
+	m.activeInput = 0
+
+	m.buttons = []string{"Register", "Cancel"}
+	m.activeBtn = 0
+	m.data["server"] = server
+	m.data["port"] = strconv.Itoa(port)
+	m.data["_isDataForm"] = strconv.FormatBool(isDataForm)
+	m.data["_formType"] = formType
+
+	// Store CAPTCHA info for later use
+	if captcha != nil {
+		m.data["_captchaType"] = captcha.Type
+		m.data["_captchaURL"] = captcha.URL
+		m.data["_captchaMime"] = captcha.MimeType
+		m.data["_captchaFieldVar"] = captcha.FieldVar
+		m.data["_captchaChallenge"] = captcha.Challenge
+	}
+	return m
+}
+
+// ShowRegisterSuccess shows the success dialog after registration
+func (m Model) ShowRegisterSuccess(jid, password, server string, port int) Model {
+	m.dialogType = DialogRegisterSuccess
+	m.title = "Registration Successful"
+	m.message = "Account created: " + jid
+	m.inputs = nil
+	m.buttons = []string{"Save & Connect", "Save Only", "Close"}
+	m.activeBtn = 0
+	m.data["jid"] = jid
+	m.data["password"] = password
+	m.data["server"] = server
+	m.data["port"] = strconv.Itoa(port)
+	return m
+}
+
+// formatBytes formats byte size to human readable string
+func formatBytes(bytes int) string {
+	if bytes < 1024 {
+		return strconv.Itoa(bytes) + " B"
+	} else if bytes < 1024*1024 {
+		return strconv.FormatFloat(float64(bytes)/1024, 'f', 1, 64) + " KB"
+	} else {
+		return strconv.FormatFloat(float64(bytes)/(1024*1024), 'f', 1, 64) + " MB"
+	}
+}
+
+// formatCaptchaInfo formats CAPTCHA information for display
+func formatCaptchaInfo(captcha *CaptchaInfo) string {
+	var msg string
+
+	switch captcha.Type {
+	case "qa":
+		// Question-answer CAPTCHA - show the question
+		if captcha.Question != "" {
+			msg += "\n\nSecurity Question: " + captcha.Question
+		}
+
+	case "audio":
+		msg += "\n\n-- Audio CAPTCHA Required --"
+		msg += formatMediaDetails(captcha, "audio")
+		msg += "\n\nPress V to play the audio challenge."
+
+	case "video":
+		msg += "\n\n-- Video CAPTCHA Required --"
+		msg += formatMediaDetails(captcha, "video")
+		msg += "\n\nPress V to play the video challenge."
+
+	case "image":
+		msg += "\n\n-- Image CAPTCHA Required --"
+		msg += formatMediaDetails(captcha, "image")
+
+	default:
+		// Unknown type - show what we have
+		if captcha.Question != "" {
+			msg += "\n\nChallenge: " + captcha.Question
+		}
+		if len(captcha.Data) > 0 || captcha.URL != "" {
+			msg += "\n\n-- CAPTCHA Required --"
+			msg += formatMediaDetails(captcha, "media")
+		}
+	}
+
+	// Show challenge type hint if available
+	if captcha.Challenge != "" {
+		challengeDesc := getChallengeDescription(captcha.Challenge)
+		if challengeDesc != "" {
+			msg += "\nTask: " + challengeDesc
+		}
+	}
+
+	return msg
+}
+
+// formatMediaDetails formats the media source information
+func formatMediaDetails(captcha *CaptchaInfo, mediaType string) string {
+	var msg string
+	hasURL := captcha.URL != "" && !strings.HasPrefix(captcha.URL, "cid:")
+	hasEmbeddedData := len(captcha.Data) > 0
+
+	// Show URL if it's a real HTTP URL
+	if hasURL {
+		msg += "\nURL: " + captcha.URL
+	}
+
+	// Show embedded data info
+	if hasEmbeddedData {
+		msg += "\nSource: Embedded " + mediaType
+		msg += "\nSize: " + formatBytes(len(captcha.Data))
+	}
+
+	// Show MIME type
+	if captcha.MimeType != "" {
+		msg += "\nFormat: " + captcha.MimeType
+	}
+
+	// Show alternative URLs count
+	if len(captcha.URLs) > 1 {
+		msg += "\nAlternatives: " + strconv.Itoa(len(captcha.URLs)) + " sources available"
+	}
+
+	// Fallback message if no source info
+	if !hasURL && !hasEmbeddedData {
+		msg += "\nSource: Server-provided " + mediaType
+	}
+
+	// Security warning only for URLs opened in browser (not for embedded data)
+	// URLs could lead to webpages with tracking scripts instead of direct media
+	if hasURL && !hasEmbeddedData {
+		msg += "\n\nNote: Opens in browser. URL may track your IP."
+	}
+
+	return msg
+}
+
+// getChallengeDescription returns a human-readable description of the challenge type
+func getChallengeDescription(challenge string) string {
+	switch challenge {
+	case "ocr":
+		return "Enter the text you see"
+	case "audio_recog":
+		return "Describe the sound you hear"
+	case "video_recog":
+		return "Identify the video content"
+	case "picture_recog":
+		return "Identify what you see in the picture"
+	case "picture_q":
+		return "Answer the question about the picture"
+	case "speech_q":
+		return "Answer the question you hear"
+	case "speech_recog":
+		return "Enter the words you hear"
+	case "video_q":
+		return "Answer the question in the video"
+	case "qa":
+		return "Answer the security question"
+	default:
+		return ""
+	}
+}
+
 // Hide hides the dialog
 func (m Model) Hide() Model {
 	m.dialogType = DialogNone
 	m.inputs = nil
 	m.data = make(map[string]string)
+	return m
+}
+
+// SetViewerStatus updates the CAPTCHA viewer field with a status message
+func (m Model) SetViewerStatus(status string) Model {
+	for i := range m.inputs {
+		if m.inputs[i].Key == "_captcha_viewer" {
+			m.inputs[i].Value = "[ " + status + " ]"
+			break
+		}
+	}
+	return m
+}
+
+// RestoreViewer restores the CAPTCHA viewer field to its default state
+func (m Model) RestoreViewer() Model {
+	hasURL := m.data["_captchaURL"] != "" && !strings.HasPrefix(m.data["_captchaURL"], "cid:")
+	var value string
+	if hasURL {
+		value = "[ V: Open | C: Copy URL ]"
+	} else {
+		value = "[ V: Open ]"
+	}
+	for i := range m.inputs {
+		if m.inputs[i].Key == "_captcha_viewer" {
+			m.inputs[i].Value = value
+			break
+		}
+	}
 	return m
 }
 
@@ -394,12 +727,68 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle 'V' (uppercase) key for viewing CAPTCHA in registration form
+		// Only trigger when focused on the read-only CAPTCHA viewer field
+		captchaType := m.data["_captchaType"]
+		isMediaCaptcha := captchaType == "image" || captchaType == "audio" || captchaType == "video"
+		if msg.String() == "V" && m.dialogType == DialogRegisterForm && isMediaCaptcha {
+			// Check if current input is the CAPTCHA viewer field
+			if m.activeInput >= 0 && m.activeInput < len(m.inputs) {
+				if m.inputs[m.activeInput].Key == "_captcha_viewer" {
+					// Collect current values before sending
+					values := make(map[string]string)
+					for _, input := range m.inputs {
+						values[input.Key] = input.Value
+					}
+					for k, v := range m.data {
+						values[k] = v
+					}
+					result := DialogResult{
+						Type:      m.dialogType,
+						Confirmed: false,
+						Action:    ActionViewCaptcha,
+						Values:    values,
+					}
+					// Don't hide dialog - just send the action
+					return m, func() tea.Msg { return result }
+				}
+			}
+		}
+
+		// Handle 'C' (uppercase) key for copying CAPTCHA URL to clipboard
+		// Only when focused on the CAPTCHA viewer field
+		if msg.String() == "C" && m.dialogType == DialogRegisterForm {
+			if m.activeInput >= 0 && m.activeInput < len(m.inputs) {
+				if m.inputs[m.activeInput].Key == "_captcha_viewer" {
+					captchaURL := m.data["_captchaURL"]
+					if captchaURL != "" && !strings.HasPrefix(captchaURL, "cid:") {
+						values := make(map[string]string)
+						for _, input := range m.inputs {
+							values[input.Key] = input.Value
+						}
+						for k, v := range m.data {
+							values[k] = v
+						}
+						result := DialogResult{
+							Type:      m.dialogType,
+							Confirmed: false,
+							Action:    ActionCopyURL,
+							Values:    values,
+						}
+						// Don't hide dialog - just send the action
+						return m, func() tea.Msg { return result }
+					}
+				}
+			}
+		}
+
 		switch msg.Type {
 		case tea.KeyEsc:
 			// Cancel dialog
 			result := DialogResult{
 				Type:      m.dialogType,
 				Confirmed: false,
+				Action:    ActionCancel,
 			}
 			m = m.Hide()
 			return m, func() tea.Msg { return result }
@@ -429,7 +818,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if m.activeBtn < 0 {
 					m.activeBtn = len(m.buttons) - 1
 				}
-			} else if m.inputs[m.activeInput].Cursor > 0 {
+			} else if !m.inputs[m.activeInput].ReadOnly && m.inputs[m.activeInput].Cursor > 0 {
+				// Only move cursor in editable fields
 				m.inputs[m.activeInput].Cursor--
 			}
 
@@ -440,7 +830,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if m.activeBtn >= len(m.buttons) {
 					m.activeBtn = 0
 				}
-			} else if m.inputs[m.activeInput].Cursor < len(m.inputs[m.activeInput].Value) {
+			} else if !m.inputs[m.activeInput].ReadOnly && m.inputs[m.activeInput].Cursor < len(m.inputs[m.activeInput].Value) {
+				// Only move cursor in editable fields
 				m.inputs[m.activeInput].Cursor++
 			}
 
@@ -455,9 +846,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 			confirmed := m.activeBtn == 0 // First button is confirm
+			action := ActionCancel
+			if confirmed {
+				action = ActionConfirm
+			}
 			result := DialogResult{
 				Type:      m.dialogType,
 				Confirmed: confirmed,
+				Button:    m.activeBtn,
+				Action:    action,
 				Values:    values,
 			}
 			m = m.Hide()
@@ -466,7 +863,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case tea.KeyBackspace:
 			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
 				input := &m.inputs[m.activeInput]
-				if input.Cursor > 0 {
+				// Skip read-only fields
+				if !input.ReadOnly && input.Cursor > 0 {
 					input.Value = input.Value[:input.Cursor-1] + input.Value[input.Cursor:]
 					input.Cursor--
 				}
@@ -475,15 +873,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case tea.KeyRunes:
 			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
 				input := &m.inputs[m.activeInput]
-				input.Value = input.Value[:input.Cursor] + string(msg.Runes) + input.Value[input.Cursor:]
-				input.Cursor += len(msg.Runes)
+				// Skip read-only fields
+				if !input.ReadOnly {
+					input.Value = input.Value[:input.Cursor] + string(msg.Runes) + input.Value[input.Cursor:]
+					input.Cursor += len(msg.Runes)
+				}
 			}
 
 		case tea.KeySpace:
 			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
 				input := &m.inputs[m.activeInput]
-				input.Value = input.Value[:input.Cursor] + " " + input.Value[input.Cursor:]
-				input.Cursor++
+				// Skip read-only fields
+				if !input.ReadOnly {
+					input.Value = input.Value[:input.Cursor] + " " + input.Value[input.Cursor:]
+					input.Cursor++
+				}
 			}
 		}
 	}
@@ -521,8 +925,15 @@ func (m Model) View() string {
 		}
 
 		var rendered string
-		if i == m.activeInput {
-			// Show cursor
+		if input.ReadOnly {
+			// Read-only field - no cursor, just highlight when focused
+			if i == m.activeInput {
+				rendered = m.styles.InputFocused.Render(label + value)
+			} else {
+				rendered = m.styles.InputNormal.Render(label + value)
+			}
+		} else if i == m.activeInput {
+			// Show cursor for editable fields
 			beforeCursor := value
 			cursorChar := " "
 			afterCursor := ""

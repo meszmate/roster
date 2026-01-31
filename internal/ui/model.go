@@ -1,8 +1,14 @@
 package ui
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -31,6 +37,9 @@ const (
 	FocusAccounts
 )
 
+// restoreViewerMsg is sent to restore the CAPTCHA viewer after showing a status
+type restoreViewerMsg struct{}
+
 // Model is the root Bubble Tea model
 type Model struct {
 	app          *app.App
@@ -57,6 +66,11 @@ type Model struct {
 	showHelp     bool
 	showSettings bool
 	quitting     bool
+
+	// CAPTCHA state for registration
+	captchaData []byte
+	captchaMime string
+	captchaURL  string
 }
 
 // NewModel creates a new root model
@@ -211,6 +225,72 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogs.New(styles)
 			m.updateComponentSizes()
 		}
+
+	case app.RegisterFormMsg:
+		// Handle registration form received
+		if msg.Error != "" {
+			m.dialog = m.dialog.ShowError("Registration error: " + msg.Error)
+		} else {
+			fields := make([]dialogs.RegistrationField, len(msg.Fields))
+			for i, f := range msg.Fields {
+				fields[i] = dialogs.RegistrationField{
+					Name:     f.Name,
+					Label:    f.Label,
+					Required: f.Required,
+					Password: f.Password,
+					Type:     f.Type,
+					Value:    f.Value,
+				}
+			}
+			// Convert CAPTCHA info if present
+			var captchaInfo *dialogs.CaptchaInfo
+			if msg.Captcha != nil {
+				captchaInfo = &dialogs.CaptchaInfo{
+					Type:      msg.Captcha.Type,
+					Challenge: msg.Captcha.Challenge,
+					MimeType:  msg.Captcha.MimeType,
+					Data:      msg.Captcha.Data,
+					URLs:      msg.Captcha.URLs,
+					URL:       msg.Captcha.URL,
+					Question:  msg.Captcha.Question,
+					FieldVar:  msg.Captcha.FieldVar,
+				}
+			}
+			m.dialog = m.dialog.ShowRegisterForm(msg.Server, msg.Port, fields, msg.Instructions, msg.IsDataForm, msg.FormType, captchaInfo)
+			// Store CAPTCHA data for later viewing
+			if msg.Captcha != nil {
+				if len(msg.Captcha.Data) > 0 {
+					m.captchaData = msg.Captcha.Data
+					m.captchaMime = msg.Captcha.MimeType
+				}
+				// Only store URL if it's a real HTTP URL, not a cid: reference
+				if msg.Captcha.URL != "" && !strings.HasPrefix(msg.Captcha.URL, "cid:") {
+					m.captchaURL = msg.Captcha.URL
+				} else if len(msg.Captcha.URLs) > 0 {
+					// Try to find an HTTP URL from alternatives
+					for _, u := range msg.Captcha.URLs {
+						if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+							m.captchaURL = u
+							break
+						}
+					}
+				}
+			}
+		}
+		m.focus = FocusDialog
+
+	case app.RegisterResultMsg:
+		// Handle registration result
+		if msg.Success {
+			m.dialog = m.dialog.ShowRegisterSuccess(msg.JID, msg.Password, msg.Server, msg.Port)
+		} else {
+			m.dialog = m.dialog.ShowError("Registration failed: " + msg.Error)
+		}
+		m.focus = FocusDialog
+
+	case restoreViewerMsg:
+		// Restore CAPTCHA viewer to default state after showing status
+		m.dialog = m.dialog.RestoreViewer()
 	}
 
 	// Update status bar with current state
@@ -937,6 +1017,10 @@ func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
 
 	case app.ActionLoadWindows:
 		m.loadWindows()
+
+	case app.ActionShowRegister:
+		m.dialog = m.dialog.ShowRegister()
+		m.focus = FocusDialog
 	}
 }
 
@@ -1030,8 +1114,340 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 		if result.Confirmed {
 			// TODO: Join room via XMPP
 		}
+
+	case dialogs.DialogRegister:
+		if result.Confirmed {
+			server := result.Values["server"]
+			portStr := result.Values["port"]
+			port := 5222
+			if portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					port = p
+				}
+			}
+			if server != "" {
+				return m.app.FetchRegistrationForm(server, port)
+			}
+		}
+
+	case dialogs.DialogRegisterForm:
+		// Handle 'V' key for viewing CAPTCHA
+		if result.Action == dialogs.ActionViewCaptcha {
+			// View CAPTCHA - open the media
+			errMsg := m.openCaptcha(result.Values["_captchaURL"])
+			if errMsg != "" {
+				// Failed to open - show error with instructions
+				m.dialog = m.dialog.ShowError(errMsg)
+				m.focus = FocusDialog
+			}
+			// Dialog stays open - user can continue filling the form
+			return nil
+		}
+
+		// Handle 'C' key for copying CAPTCHA URL
+		if result.Action == dialogs.ActionCopyURL {
+			url := result.Values["_captchaURL"]
+			if url != "" {
+				if err := m.copyToClipboard(url); err != nil {
+					m.dialog = m.dialog.ShowError("Failed to copy URL: " + err.Error() + "\n\nURL: " + url)
+					m.focus = FocusDialog
+				} else {
+					// Show success feedback temporarily
+					m.dialog = m.dialog.SetViewerStatus("Copied!")
+					// Return a command to restore after 1 second
+					return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+						return restoreViewerMsg{}
+					})
+				}
+				// Dialog stays open - user can continue filling the form
+			}
+			return nil
+		}
+
+		if result.Confirmed {
+			server := result.Values["server"]
+			portStr := result.Values["port"]
+			port := 5222
+			if portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					port = p
+				}
+			}
+
+			// Get data form info
+			isDataForm := result.Values["_isDataForm"] == "true"
+			formType := result.Values["_formType"]
+
+			// Build fields map, including hidden fields
+			fields := make(map[string]string)
+			for k, v := range result.Values {
+				// Skip internal metadata fields (start with underscore but not _hidden_)
+				if strings.HasPrefix(k, "_") && !strings.HasPrefix(k, "_hidden_") {
+					continue
+				}
+				// Skip the captcha viewer field
+				if k == "_captcha_viewer" {
+					continue
+				}
+				// Include hidden fields (prefixed with _hidden_)
+				if strings.HasPrefix(k, "_hidden_") {
+					fields[strings.TrimPrefix(k, "_hidden_")] = v
+				} else {
+					fields[k] = v
+				}
+			}
+			return m.app.SubmitRegistration(server, port, fields, isDataForm, formType)
+		}
+
+	case dialogs.DialogRegisterSuccess:
+		jid := result.Values["jid"]
+		password := result.Values["password"]
+		server := result.Values["server"]
+		portStr := result.Values["port"]
+		port := 5222
+		if portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				port = p
+			}
+		}
+
+		// Button 0 = Save & Connect, Button 1 = Save Only, Button 2 = Close
+		switch result.Button {
+		case 0: // Save & Connect
+			acc := config.Account{
+				JID:         jid,
+				Password:    password,
+				Server:      server,
+				Port:        port,
+				AutoConnect: true,
+				OMEMO:       true,
+				Resource:    "roster",
+			}
+			m.app.AddAccount(acc)
+			return m.app.ExecuteCommand("connect", []string{jid})
+
+		case 1: // Save Only
+			acc := config.Account{
+				JID:         jid,
+				Password:    password,
+				Server:      server,
+				Port:        port,
+				AutoConnect: false,
+				OMEMO:       true,
+				Resource:    "roster",
+			}
+			m.app.AddAccount(acc)
+		}
+		// Button 2 (Close) just closes the dialog without saving
 	}
 
 	m.focus = FocusRoster
 	return nil
+}
+
+// openCaptcha opens a CAPTCHA media for the user to view/play
+// It handles URLs, data: URIs, and raw embedded data
+// Returns an error message if the CAPTCHA couldn't be opened, or empty string on success
+func (m *Model) openCaptcha(url string) string {
+	// Use stored URL if not provided directly (CID URIs are filtered out earlier)
+	if url == "" || strings.HasPrefix(url, "cid:") {
+		url = m.captchaURL
+	}
+
+	if url != "" {
+		// Open URL in browser/media player
+		if m.openURL(url) {
+			return ""
+		}
+		return "No application found to open media.\n\nPlease manually open this URL:\n" + url
+	}
+
+	// If we have raw media data, save it to a temp file and open
+	if len(m.captchaData) > 0 {
+		// Determine file extension and media type from MIME type
+		ext, mediaType := getExtensionForMime(m.captchaMime)
+
+		// Create temp file
+		tmpDir := os.TempDir()
+		tmpFile := filepath.Join(tmpDir, "roster-captcha"+ext)
+
+		if err := os.WriteFile(tmpFile, m.captchaData, 0600); err != nil {
+			return "Failed to save CAPTCHA " + mediaType + ": " + err.Error()
+		}
+
+		// Open with system viewer/player
+		if m.openFile(tmpFile) {
+			return ""
+		}
+		return "No " + mediaType + " viewer found.\n\nCAPTCHA " + mediaType + " saved to:\n" + tmpFile + "\n\nPlease open it manually."
+	}
+
+	return "No CAPTCHA data available."
+}
+
+// getExtensionForMime returns the file extension and media type description for a MIME type
+func getExtensionForMime(mimeType string) (ext string, mediaType string) {
+	// Default values
+	ext = ".bin"
+	mediaType = "file"
+
+	// Normalize MIME type (remove parameters)
+	if idx := strings.Index(mimeType, ";"); idx > 0 {
+		mimeType = strings.TrimSpace(mimeType[:idx])
+	}
+
+	switch mimeType {
+	// Images
+	case "image/png":
+		return ".png", "image"
+	case "image/jpeg", "image/jpg":
+		return ".jpg", "image"
+	case "image/gif":
+		return ".gif", "image"
+	case "image/webp":
+		return ".webp", "image"
+	case "image/bmp":
+		return ".bmp", "image"
+	case "image/svg+xml":
+		return ".svg", "image"
+
+	// Audio
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return ".wav", "audio"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3", "audio"
+	case "audio/ogg":
+		return ".ogg", "audio"
+	case "audio/webm":
+		return ".webm", "audio"
+	case "audio/flac":
+		return ".flac", "audio"
+	case "audio/aac":
+		return ".aac", "audio"
+	case "audio/x-speex", "audio/speex", "audio/ogg-speex", "audio/ogg; codecs=speex":
+		return ".spx", "audio"
+
+	// Video
+	case "video/mp4":
+		return ".mp4", "video"
+	case "video/mpeg":
+		return ".mpg", "video"
+	case "video/webm":
+		return ".webm", "video"
+	case "video/ogg":
+		return ".ogv", "video"
+	case "video/quicktime":
+		return ".mov", "video"
+	case "video/x-msvideo":
+		return ".avi", "video"
+
+	default:
+		// Try to determine from prefix
+		if strings.HasPrefix(mimeType, "image/") {
+			return ".png", "image"
+		}
+		if strings.HasPrefix(mimeType, "audio/") {
+			return ".wav", "audio"
+		}
+		if strings.HasPrefix(mimeType, "video/") {
+			return ".mp4", "video"
+		}
+		return ".bin", "media"
+	}
+}
+
+// openURL opens a URL in the default browser
+// Returns true if successful, false if no browser was found
+func (m *Model) openURL(url string) bool {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start() == nil
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start() == nil
+	case "linux", "freebsd", "openbsd", "netbsd":
+		// Try multiple openers in order of preference
+		openers := [][]string{
+			{"xdg-open", url},
+			{"sensible-browser", url},
+			{"x-www-browser", url},
+			{"gnome-open", url},
+			{"kde-open", url},
+			{"firefox", url},
+			{"chromium", url},
+			{"chromium-browser", url},
+			{"google-chrome", url},
+			{"google-chrome-stable", url},
+		}
+		for _, opener := range openers {
+			if path, err := exec.LookPath(opener[0]); err == nil {
+				if exec.Command(path, opener[1:]...).Start() == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// openFile opens a file with the default system application
+// Returns true if successful, false if no viewer was found
+func (m *Model) openFile(path string) bool {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", path).Start() == nil
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", path).Start() == nil
+	case "linux", "freebsd", "openbsd", "netbsd":
+		// Try multiple openers in order of preference
+		// First try generic openers, then image-specific viewers
+		openers := [][]string{
+			{"xdg-open", path},
+			{"sensible-browser", path},
+			{"gnome-open", path},
+			{"kde-open", path},
+			// Image viewers as fallback
+			{"eog", path},           // GNOME Eye of GNOME
+			{"gwenview", path},      // KDE
+			{"feh", path},           // Lightweight
+			{"sxiv", path},          // Simple X Image Viewer
+			{"imv", path},           // Wayland-native
+			{"display", path},       // ImageMagick
+		}
+		for _, opener := range openers {
+			if execPath, err := exec.LookPath(opener[0]); err == nil {
+				if exec.Command(execPath, opener[1:]...).Start() == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// copyToClipboard copies text to the system clipboard
+func (m *Model) copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "clip")
+	case "linux", "freebsd", "openbsd", "netbsd":
+		// Try xclip first, then xsel, then wl-copy (Wayland)
+		if path, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command(path, "-selection", "clipboard")
+		} else if path, err := exec.LookPath("xsel"); err == nil {
+			cmd = exec.Command(path, "--clipboard", "--input")
+		} else if path, err := exec.LookPath("wl-copy"); err == nil {
+			cmd = exec.Command(path)
+		} else {
+			return fmt.Errorf("no clipboard tool found (install xclip, xsel, or wl-copy)")
+		}
+	default:
+		return fmt.Errorf("clipboard not supported on %s", runtime.GOOS)
+	}
+
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
