@@ -21,9 +21,16 @@ type Contact struct {
 
 // AccountDisplay represents an account for display in the sidebar
 type AccountDisplay struct {
-	JID      string
-	Status   string // online, connecting, failed, offline
-	Unread   int
+	JID         string
+	Status      string // online, connecting, failed, offline
+	UnreadMsgs  int    // Total unread messages
+	UnreadChats int    // Number of contacts with unread messages
+	Server      string // Server address
+	Port        int    // Port number
+	Resource    string // Client resource name
+	OMEMO       bool   // Encryption enabled
+	Session     bool   // Session-only (not saved)
+	AutoConnect bool   // Auto-connect on startup
 }
 
 // Section represents which section is focused in the roster
@@ -60,24 +67,28 @@ type Model struct {
 	searchIndex int
 
 	// Account section
-	accounts        []AccountDisplay
-	showAccountList bool  // Full account list mode
-	accountSelected int   // Selection in account section
-	focusSection    Section // Contacts or Accounts
-	maxVisibleAccounts int // Maximum visible accounts before "+N more"
+	accounts           []AccountDisplay
+	showAccountList    bool    // Full account list mode
+	accountSelected    int     // Selection in account section
+	accountOffset      int     // Scroll offset for accounts
+	focusSection       Section // Contacts or Accounts
+	maxVisibleAccounts int     // Maximum visible accounts when not focused
+	maxExpandedAccounts int    // Maximum visible accounts when focused (auto-expand)
+	showAccountTooltip bool    // Show inline account info tooltip
 }
 
 // New creates a new roster model
 func New(styles *theme.Styles) Model {
 	return Model{
-		contacts:           []Contact{},
-		groups:             make(map[string][]Contact),
-		styles:             styles,
-		showGroups:         true,
-		expandedGroups:     make(map[string]bool),
-		accounts:           []AccountDisplay{},
-		focusSection:       SectionContacts,
-		maxVisibleAccounts: 3,
+		contacts:            []Contact{},
+		groups:              make(map[string][]Contact),
+		styles:              styles,
+		showGroups:          true,
+		expandedGroups:      make(map[string]bool),
+		accounts:            []AccountDisplay{},
+		focusSection:        SectionContacts,
+		maxVisibleAccounts:  3,
+		maxExpandedAccounts: 6, // Show more when focused, but don't take all space
 	}
 }
 
@@ -123,9 +134,19 @@ func (m Model) SetSize(width, height int) Model {
 	return m
 }
 
-// SetAccounts sets the connected accounts
+// SetAccounts sets the accounts (both saved and session) and sorts them
 func (m Model) SetAccounts(accounts []AccountDisplay) Model {
-	m.accounts = accounts
+	// Separate into saved and session accounts
+	var saved, session []AccountDisplay
+	for _, acc := range accounts {
+		if acc.Session {
+			session = append(session, acc)
+		} else {
+			saved = append(saved, acc)
+		}
+	}
+	// Combine: saved first, then session
+	m.accounts = append(saved, session...)
 	return m
 }
 
@@ -144,6 +165,23 @@ func (m Model) SetFocusSection(section Section) Model {
 func (m Model) ToggleAccountList() Model {
 	m.showAccountList = !m.showAccountList
 	return m
+}
+
+// ShowAccountTooltip shows the inline account info tooltip
+func (m Model) ShowAccountTooltip() Model {
+	m.showAccountTooltip = true
+	return m
+}
+
+// HideAccountTooltip hides the inline account info tooltip
+func (m Model) HideAccountTooltip() Model {
+	m.showAccountTooltip = false
+	return m
+}
+
+// IsAccountTooltipVisible returns whether the tooltip is visible
+func (m Model) IsAccountTooltipVisible() bool {
+	return m.showAccountTooltip
 }
 
 // IsAccountListExpanded returns whether the account list is expanded
@@ -176,13 +214,19 @@ func (m Model) MoveToContacts() Model {
 
 // MoveUp moves the selection up
 func (m Model) MoveUp() Model {
+	m.showAccountTooltip = false // Hide tooltip on navigation
 	if m.focusSection == SectionAccounts {
 		// In accounts section
 		if m.accountSelected > 0 {
 			m.accountSelected--
+			// Adjust offset to keep selection in view
+			if m.accountSelected < m.accountOffset {
+				m.accountOffset = m.accountSelected
+			}
 		} else {
 			// Move to contacts section
 			m.focusSection = SectionContacts
+			m.accountOffset = 0 // Reset offset when leaving accounts
 			if len(m.contacts) > 0 {
 				m.selected = len(m.contacts) - 1
 				// Adjust offset to show selected
@@ -205,6 +249,7 @@ func (m Model) MoveUp() Model {
 
 // MoveDown moves the selection down
 func (m Model) MoveDown() Model {
+	m.showAccountTooltip = false // Hide tooltip on navigation
 	if m.focusSection == SectionContacts {
 		// In contacts section
 		if m.selected < len(m.contacts)-1 {
@@ -216,15 +261,17 @@ func (m Model) MoveDown() Model {
 			// Move to accounts section
 			m.focusSection = SectionAccounts
 			m.accountSelected = 0
+			m.accountOffset = 0
 		}
 	} else {
-		// In accounts section
-		maxAccounts := m.maxVisibleAccounts
-		if m.showAccountList {
-			maxAccounts = len(m.accounts)
-		}
-		if m.accountSelected < maxAccounts-1 && m.accountSelected < len(m.accounts)-1 {
+		// In accounts section - allow full navigation through all accounts
+		if m.accountSelected < len(m.accounts)-1 {
 			m.accountSelected++
+			// Adjust offset to keep selection in view
+			maxVisible := m.getMaxVisibleAccounts()
+			if m.accountSelected >= m.accountOffset+maxVisible {
+				m.accountOffset = m.accountSelected - maxVisible + 1
+			}
 		}
 	}
 	return m
@@ -365,20 +412,96 @@ func (m Model) findMatches(query string) []int {
 	return matches
 }
 
+// getMaxVisibleAccounts returns the max accounts to show based on focus state
+func (m Model) getMaxVisibleAccounts() int {
+	if m.focusSection == SectionAccounts {
+		return m.maxExpandedAccounts
+	}
+	return m.maxVisibleAccounts
+}
+
 // getAccountSectionHeight returns the height needed for the accounts section
 func (m Model) getAccountSectionHeight() int {
 	if len(m.accounts) == 0 {
 		return 0
 	}
-	// Header (1) + separator (1) + accounts (up to 3) + "+N more" line if needed (1)
-	numVisible := m.maxVisibleAccounts
-	if m.showAccountList || len(m.accounts) <= m.maxVisibleAccounts {
-		numVisible = len(m.accounts)
+
+	// Separate saved and session accounts
+	var savedCount, sessionCount int
+	for _, acc := range m.accounts {
+		if acc.Session {
+			sessionCount++
+		} else {
+			savedCount++
+		}
 	}
-	height := 2 + numVisible // header + separator + visible accounts
-	if len(m.accounts) > m.maxVisibleAccounts && !m.showAccountList {
-		height++ // "+N more" line
+
+	maxVisible := m.getMaxVisibleAccounts()
+	height := 0
+
+	// Saved accounts section
+	if savedCount > 0 {
+		height += 2 // separator + header
+		numVisible := maxVisible
+		if m.showAccountList || savedCount <= maxVisible {
+			numVisible = savedCount
+		}
+		height += numVisible * 2 // 2 lines per account (JID + stats)
+		// Add height for ↑N more indicator if there are hidden accounts above
+		if m.accountOffset > 0 && m.focusSection == SectionAccounts {
+			height++ // "↑N more" line
+		}
+		// Add height for ↓N more indicator if there are hidden accounts below
+		if savedCount > maxVisible && !m.showAccountList {
+			height++ // "↓N more" line
+		}
 	}
+
+	// Session accounts section
+	if sessionCount > 0 {
+		height += 2 // separator + header
+		numVisible := maxVisible
+		if m.showAccountList {
+			numVisible = sessionCount
+		}
+		if sessionCount < numVisible {
+			numVisible = sessionCount
+		}
+		height += numVisible * 2 // 2 lines per account
+		if sessionCount > numVisible && !m.showAccountList {
+			height++ // "↓N more" line
+		}
+	}
+
+	// Add tooltip height only when visible
+	if m.showAccountTooltip && m.focusSection == SectionAccounts {
+		height++ // For the newline before tooltip
+		height += m.getTooltipHeight()
+	}
+
+	return height
+}
+
+// getTooltipHeight returns the height of the tooltip
+func (m Model) getTooltipHeight() int {
+	if m.accountSelected < 0 || m.accountSelected >= len(m.accounts) {
+		return 0
+	}
+
+	acc := m.accounts[m.accountSelected]
+	// Fixed lines: border(1) + status(1) + flags(1) + separator(1) + hint1(1) + hint2(1) = 6
+	height := 6
+
+	if acc.Server != "" {
+		height++
+	}
+	if acc.Resource != "" {
+		height++
+	}
+	if acc.UnreadMsgs > 0 {
+		height++
+	}
+
 	return height
 }
 
@@ -451,17 +574,41 @@ func (m Model) View() string {
 				if len(line) > m.width-4 {
 					line = line[:m.width-4]
 				}
-				b.WriteString(m.styles.RosterContact.Render(" " + line))
+				b.WriteString(m.styles.RosterContact.Width(m.width - 2).Render(" " + line))
 				b.WriteString("\n")
 			}
 		}
-		// Pad remaining
-		for i := len(helpLines); i < visibleHeight; i++ {
+		// Pad remaining - use actual lines rendered, not len(helpLines)
+		blankLine := strings.Repeat(" ", m.width-2)
+		linesRendered := len(helpLines)
+		if linesRendered > visibleHeight {
+			linesRendered = visibleHeight
+		}
+		for i := linesRendered; i < visibleHeight; i++ {
+			b.WriteString(blankLine)
 			b.WriteString("\n")
 		}
 	} else {
-		// Render contacts
-		for i := m.offset; i < len(m.contacts) && i < m.offset+visibleHeight; i++ {
+		// Calculate actual visible height accounting for scroll indicators
+		actualVisibleHeight := visibleHeight
+		if m.offset > 0 {
+			actualVisibleHeight-- // Reserve line for "↑N more"
+		}
+		hiddenBelow := len(m.contacts) - m.offset - actualVisibleHeight
+		if hiddenBelow > 0 {
+			actualVisibleHeight-- // Reserve line for "↓N more"
+			hiddenBelow = len(m.contacts) - m.offset - actualVisibleHeight
+		}
+
+		// Show "↑N more" indicator if there are hidden contacts above
+		if m.offset > 0 {
+			moreText := fmt.Sprintf("  ↑ %d more", m.offset)
+			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
+			b.WriteString("\n")
+		}
+
+		// Render visible contacts
+		for i := m.offset; i < len(m.contacts) && i < m.offset+actualVisibleHeight; i++ {
 			c := m.contacts[i]
 			selected := i == m.selected && m.focusSection == SectionContacts
 			line := m.renderContact(c, selected)
@@ -469,16 +616,33 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 
+		// Show "↓N more" indicator if there are hidden contacts below
+		if hiddenBelow > 0 {
+			moreText := fmt.Sprintf("  ↓ %d more", hiddenBelow)
+			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
+			b.WriteString("\n")
+		}
+
 		// Pad remaining contact lines
 		contactsRendered := 0
 		if len(m.contacts) > 0 {
-			end := m.offset + visibleHeight
+			end := m.offset + actualVisibleHeight
 			if end > len(m.contacts) {
 				end = len(m.contacts)
 			}
 			contactsRendered = end - m.offset
 		}
-		for i := contactsRendered; i < visibleHeight; i++ {
+		// Account for indicator lines in padding calculation
+		linesUsed := contactsRendered
+		if m.offset > 0 {
+			linesUsed++
+		}
+		if hiddenBelow > 0 {
+			linesUsed++
+		}
+		blankLine := strings.Repeat(" ", m.width-2)
+		for i := linesUsed; i < visibleHeight; i++ {
+			b.WriteString(blankLine)
 			b.WriteString("\n")
 		}
 	}
@@ -488,51 +652,272 @@ func (m Model) View() string {
 		b.WriteString(m.renderAccountsSection())
 	}
 
-	return b.String()
+	// Count lines rendered and pad to full height to clear old content
+	result := b.String()
+	lineCount := strings.Count(result, "\n")
+	if lineCount < m.height-1 {
+		blankLine := strings.Repeat(" ", m.width-2)
+		for i := lineCount; i < m.height-1; i++ {
+			result += blankLine + "\n"
+		}
+	}
+
+	return result
 }
 
-// renderAccountsSection renders the accounts section at the bottom
+// renderAccountsSection renders the accounts section at the bottom with separate saved/session sections
 func (m Model) renderAccountsSection() string {
 	var b strings.Builder
 
-	// Separator
-	separator := strings.Repeat("═", m.width-4)
-	b.WriteString(m.styles.RosterContact.Render(" " + separator))
-	b.WriteString("\n")
-
-	// Header
-	b.WriteString(m.styles.RosterGroup.Width(m.width - 2).Render(" Accounts:"))
-	b.WriteString("\n")
-
-	// Determine how many accounts to show
-	numToShow := m.maxVisibleAccounts
-	if m.showAccountList || len(m.accounts) <= m.maxVisibleAccounts {
-		numToShow = len(m.accounts)
+	// Separate saved and session accounts
+	var saved, session []AccountDisplay
+	for _, acc := range m.accounts {
+		if acc.Session {
+			session = append(session, acc)
+		} else {
+			saved = append(saved, acc)
+		}
 	}
 
-	// Render visible accounts
-	for i := 0; i < numToShow && i < len(m.accounts); i++ {
-		acc := m.accounts[i]
-		selected := i == m.accountSelected && m.focusSection == SectionAccounts
-		line := m.renderAccount(acc, selected)
-		b.WriteString(line)
-		if i < numToShow-1 || (len(m.accounts) > m.maxVisibleAccounts && !m.showAccountList) {
+	maxVisible := m.getMaxVisibleAccounts()
+	isFocused := m.focusSection == SectionAccounts
+
+	// Track global account index for selection highlighting
+	globalIdx := 0
+
+	// Render Saved Accounts section if there are any
+	if len(saved) > 0 {
+		// Separator
+		separator := strings.Repeat("─", m.width-4)
+		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" " + separator))
+		b.WriteString("\n")
+
+		// Header with position indicator when focused
+		headerText := " Saved Accounts"
+		if isFocused && len(saved) > maxVisible {
+			headerText = fmt.Sprintf(" Saved Accounts [%d/%d]", m.accountSelected+1, len(m.accounts))
+		}
+		b.WriteString(m.styles.RosterGroup.Width(m.width - 2).Render(headerText))
+		b.WriteString("\n")
+
+		// Calculate visible range with scroll offset
+		startIdx := 0
+		endIdx := len(saved)
+		if len(saved) > maxVisible && !m.showAccountList {
+			// Apply scroll offset when focused
+			if isFocused {
+				// Keep selection in view
+				if m.accountSelected < m.accountOffset {
+					m.accountOffset = m.accountSelected
+				} else if m.accountSelected >= m.accountOffset+maxVisible {
+					m.accountOffset = m.accountSelected - maxVisible + 1
+				}
+				startIdx = m.accountOffset
+				endIdx = startIdx + maxVisible
+				if endIdx > len(saved) {
+					endIdx = len(saved)
+				}
+			} else {
+				endIdx = maxVisible
+			}
+		}
+
+		// Show "↑N more" indicator if there are hidden accounts above
+		if startIdx > 0 {
+			moreText := fmt.Sprintf("  ↑ %d more", startIdx)
+			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
+			b.WriteString("\n")
+		}
+
+		// Render visible saved accounts
+		for i := startIdx; i < endIdx && i < len(saved); i++ {
+			acc := saved[i]
+			selected := globalIdx+i-startIdx == m.accountSelected && isFocused
+
+			// Build position indicator for selected account
+			posIndicator := ""
+			if selected && len(m.accounts) > maxVisible {
+				aboveCount := m.accountSelected
+				belowCount := len(m.accounts) - m.accountSelected - 1
+				if aboveCount > 0 || belowCount > 0 {
+					posIndicator = fmt.Sprintf(" %d↑ %d↓", aboveCount, belowCount)
+				}
+			}
+
+			line := m.renderAccountWithIndicator(acc, selected, posIndicator)
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+		globalIdx += endIdx - startIdx
+
+		// Show "↓N more" indicator if there are hidden accounts below
+		hiddenBelow := len(saved) - endIdx
+		if hiddenBelow > 0 {
+			moreText := fmt.Sprintf("  ↓ %d more", hiddenBelow)
+			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
+			b.WriteString("\n")
+		}
+
+		// Update globalIdx to account for all saved accounts (for session section selection)
+		globalIdx = len(saved)
+	}
+
+	// Render Session Accounts section if there are any
+	if len(session) > 0 {
+		// Separator
+		separator := strings.Repeat("─", m.width-4)
+		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" " + separator))
+		b.WriteString("\n")
+
+		// Header
+		b.WriteString(m.styles.RosterGroup.Width(m.width - 2).Render(" Session"))
+		b.WriteString("\n")
+
+		// Determine how many to show
+		maxForSession := maxVisible
+		if m.showAccountList {
+			maxForSession = len(session)
+		}
+
+		// Render session accounts
+		for i := 0; i < maxForSession && i < len(session); i++ {
+			acc := session[i]
+			selected := globalIdx == m.accountSelected && isFocused
+
+			// Build position indicator for selected account
+			posIndicator := ""
+			if selected && len(m.accounts) > maxVisible {
+				aboveCount := m.accountSelected
+				belowCount := len(m.accounts) - m.accountSelected - 1
+				if aboveCount > 0 || belowCount > 0 {
+					posIndicator = fmt.Sprintf(" %d↑ %d↓", aboveCount, belowCount)
+				}
+			}
+
+			line := m.renderAccountWithIndicator(acc, selected, posIndicator)
+			b.WriteString(line)
+			b.WriteString("\n")
+			globalIdx++
+		}
+
+		// Show "↓N more" for session accounts
+		if len(session) > maxForSession && !m.showAccountList {
+			more := len(session) - maxForSession
+			moreText := fmt.Sprintf("  ↓ %d more", more)
+			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
 			b.WriteString("\n")
 		}
 	}
 
-	// Show "+N more" if there are more accounts
-	if len(m.accounts) > m.maxVisibleAccounts && !m.showAccountList {
-		more := len(m.accounts) - m.maxVisibleAccounts
-		moreText := fmt.Sprintf(" +%d more...", more)
-		b.WriteString(m.styles.RosterContact.Width(m.width - 2).Render(moreText))
+	// Append tooltip only when visible
+	if m.showAccountTooltip && isFocused {
+		b.WriteString("\n")
+		b.WriteString(m.renderAccountTooltip())
 	}
 
 	return b.String()
 }
 
-// renderAccount renders a single account line
-func (m Model) renderAccount(acc AccountDisplay, selected bool) string {
+// GetAccountTooltipContent returns the tooltip content for overlay rendering
+func (m Model) GetAccountTooltipContent() string {
+	if !m.showAccountTooltip || m.focusSection != SectionAccounts {
+		return ""
+	}
+	return m.renderAccountTooltip()
+}
+
+// renderAccountTooltip renders the inline account info tooltip
+func (m Model) renderAccountTooltip() string {
+	if m.accountSelected < 0 || m.accountSelected >= len(m.accounts) {
+		return ""
+	}
+
+	acc := m.accounts[m.accountSelected]
+	var b strings.Builder
+
+	// Top border
+	border := strings.Repeat("─", m.width-4)
+	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" " + border))
+	b.WriteString("\n")
+
+	// Status line with icon
+	var statusIcon string
+	switch acc.Status {
+	case "online":
+		statusIcon = "●"
+	case "connecting":
+		statusIcon = "◐"
+	case "failed":
+		statusIcon = "✘"
+	default:
+		statusIcon = "○"
+	}
+
+	// Status
+	statusLine := fmt.Sprintf(" %s %s", statusIcon, strings.ToUpper(acc.Status[:1])+acc.Status[1:])
+	b.WriteString(m.styles.RosterContact.Width(m.width - 2).Render(statusLine))
+	b.WriteString("\n")
+
+	// Server info
+	if acc.Server != "" {
+		serverInfo := " " + acc.Server
+		if acc.Port > 0 && acc.Port != 5222 {
+			serverInfo += fmt.Sprintf(":%d", acc.Port)
+		}
+		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(serverInfo))
+		b.WriteString("\n")
+	}
+
+	// Resource
+	if acc.Resource != "" {
+		resourceLine := " Resource: " + acc.Resource
+		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(resourceLine))
+		b.WriteString("\n")
+	}
+
+	// Unread
+	if acc.UnreadMsgs > 0 {
+		unreadLine := fmt.Sprintf(" %d unread", acc.UnreadMsgs)
+		if acc.UnreadChats > 0 {
+			unreadLine += fmt.Sprintf(" from %d chats", acc.UnreadChats)
+		}
+		b.WriteString(m.styles.RosterUnread.Width(m.width - 2).Render(unreadLine))
+		b.WriteString("\n")
+	}
+
+	// Flags
+	var flags []string
+	if acc.OMEMO {
+		flags = append(flags, "OMEMO")
+	}
+	if acc.AutoConnect {
+		flags = append(flags, "Auto")
+	}
+	if acc.Session {
+		flags = append(flags, "Session")
+	} else {
+		flags = append(flags, "Saved")
+	}
+	if len(flags) > 0 {
+		flagsLine := " " + strings.Join(flags, " · ")
+		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(flagsLine))
+		b.WriteString("\n")
+	}
+
+	// Key hints
+	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" ─────────────────────"))
+	b.WriteString("\n")
+	keyHints := " C=connect  D=disconnect"
+	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("244")).Width(m.width - 2).Render(keyHints))
+	b.WriteString("\n")
+	keyHints2 := " E=edit     X=remove"
+	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("244")).Width(m.width - 2).Render(keyHints2))
+
+	return b.String()
+}
+
+// renderAccountWithIndicator renders an account with optional position indicator
+func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, posIndicator string) string {
 	// Status indicator
 	var indicator string
 	var indicatorStyle lipgloss.Style
@@ -553,35 +938,83 @@ func (m Model) renderAccount(acc AccountDisplay, selected bool) string {
 
 	presence := indicatorStyle.Render(indicator)
 
-	// JID (truncate if needed)
+	// JID (truncate if needed, accounting for position indicator)
 	jid := acc.JID
-	maxWidth := m.width - 10 // presence + padding + unread
+	maxWidth := m.width - 6 - len(posIndicator) // presence + padding + indicator
 	if len(jid) > maxWidth && maxWidth > 0 {
 		jid = jid[:maxWidth-1] + "…"
 	}
 
-	// Unread indicator
-	unread := ""
-	if acc.Unread > 0 {
-		unread = m.styles.RosterUnread.Render(fmt.Sprintf(" (%d)", acc.Unread))
-	}
-
-	// Build line
+	// Build line style
 	var style lipgloss.Style
+	var dimStyle lipgloss.Style
 	if selected {
 		style = m.styles.RosterSelected
+		dimStyle = m.styles.RosterSelected
+	} else if acc.Status == "offline" || acc.Status == "failed" {
+		// Dimmed style for offline/failed accounts
+		style = m.styles.RosterContact.Foreground(lipgloss.Color("242"))
+		dimStyle = m.styles.RosterContact.Foreground(lipgloss.Color("242"))
 	} else {
 		style = m.styles.RosterContact
+		dimStyle = m.styles.RosterContact.Foreground(lipgloss.Color("242"))
 	}
 
-	content := fmt.Sprintf(" %s %s%s", presence, jid, unread)
+	// First line: indicator + JID + position indicator (if any)
+	line1 := fmt.Sprintf(" %s %s", presence, jid)
 
-	// Pad to width
-	if len(content) < m.width-2 {
-		content += strings.Repeat(" ", m.width-2-len(content))
+	// Add position indicator on the right side if present
+	if posIndicator != "" {
+		// Calculate padding to right-align the position indicator
+		padLen := m.width - 2 - len(line1) - len(posIndicator)
+		if padLen > 0 {
+			line1 += strings.Repeat(" ", padLen) + posIndicator
+		}
+	} else {
+		// Pad first line to width
+		if len(line1) < m.width-2 {
+			line1 += strings.Repeat(" ", m.width-2-len(line1))
+		}
 	}
 
-	return style.Width(m.width - 2).Render(content)
+	// Second line: stats
+	var statsLine string
+	if acc.Status == "connecting" {
+		statsLine = "  connecting..."
+	} else if acc.Status == "offline" {
+		statsLine = "  offline"
+		if acc.OMEMO {
+			statsLine += " · OMEMO"
+		}
+	} else if acc.Status == "failed" {
+		statsLine = "  connection failed"
+	} else {
+		// Online: show unread stats
+		var parts []string
+		if acc.UnreadMsgs > 0 {
+			parts = append(parts, fmt.Sprintf("%d msgs", acc.UnreadMsgs))
+		}
+		if acc.UnreadChats > 0 {
+			parts = append(parts, fmt.Sprintf("%d chats", acc.UnreadChats))
+		}
+		if acc.OMEMO {
+			parts = append(parts, "OMEMO")
+		} else {
+			parts = append(parts, "Plain")
+		}
+		if len(parts) > 0 {
+			statsLine = "  " + strings.Join(parts, " · ")
+		}
+	}
+
+	// Pad stats line to width
+	if len(statsLine) < m.width-2 {
+		statsLine += strings.Repeat(" ", m.width-2-len(statsLine))
+	}
+
+	// Combine lines
+	result := style.Width(m.width - 2).Render(line1) + "\n" + dimStyle.Width(m.width - 2).Render(statsLine)
+	return result
 }
 
 // renderContact renders a single contact line

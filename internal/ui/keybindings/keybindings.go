@@ -148,6 +148,12 @@ const (
 
 	// Context help
 	ActionShowContextHelp
+
+	// Account actions (when focused on accounts section)
+	ActionAccountConnect
+	ActionAccountDisconnect
+	ActionAccountRemove
+	ActionAccountEdit
 )
 
 // KeyBinding represents a key binding
@@ -291,6 +297,12 @@ func (m *Manager) setupDefaultBindings() {
 
 		// Context help
 		"H":        ActionShowContextHelp,   // Show context-sensitive help/info popup
+
+		// Account actions (work when focused on accounts section)
+		"C":        ActionAccountConnect,    // Connect to selected account
+		"D":        ActionAccountDisconnect, // Disconnect selected account
+		"X":        ActionAccountRemove,     // Remove selected account (with confirmation)
+		"E":        ActionAccountEdit,       // Edit selected account
 	}
 
 	// Insert mode bindings

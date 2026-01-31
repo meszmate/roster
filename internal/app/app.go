@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -312,6 +313,12 @@ func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 					a.SetDefaultAccount(args[1])
 				}
 				return nil
+			case "resource":
+				// :account resource <jid> <resource_name>
+				if len(args) >= 3 {
+					a.SetAccountResource(args[1], args[2])
+				}
+				return nil
 			}
 			return nil
 
@@ -516,6 +523,20 @@ func (a *App) SetDefaultAccount(jid string) {
 	_ = config.SaveAccounts(a.accounts)
 }
 
+// SetAccountResource sets the resource (client identifier) for an account
+func (a *App) SetAccountResource(jid, resource string) {
+	for i := range a.accounts.Accounts {
+		if a.accounts.Accounts[i].JID == jid {
+			a.accounts.Accounts[i].Resource = resource
+			// Only save if it's not a session account
+			if !a.accounts.Accounts[i].Session {
+				_ = config.SaveAccounts(a.accounts)
+			}
+			return
+		}
+	}
+}
+
 // AddAccount adds a new persistent account (saved to disk)
 func (a *App) AddAccount(acc config.Account) {
 	acc.Session = false // Ensure it's not a session account
@@ -658,6 +679,59 @@ func (a *App) GetConnectedAccounts() []ConnectedAccount {
 	return result
 }
 
+// AccountDisplayInfo holds complete account info for UI display
+type AccountDisplayInfo struct {
+	JID         string
+	Status      string // online, connecting, failed, offline
+	UnreadMsgs  int    // Total unread messages
+	UnreadChats int    // Number of contacts with unread messages
+	Server      string
+	Port        int
+	Resource    string
+	OMEMO       bool
+	Session     bool
+	AutoConnect bool
+}
+
+// GetAllAccountsDisplay returns ALL accounts with full display info
+func (a *App) GetAllAccountsDisplay() []AccountDisplayInfo {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var result []AccountDisplayInfo
+	for _, acc := range a.accounts.Accounts {
+		status := a.accountStatuses[acc.JID]
+		if status == "" {
+			status = "offline"
+		}
+
+		// Calculate unread messages and chats
+		unreadMsgs := a.accountUnreads[acc.JID]
+		unreadChats := 0
+
+		// Count contacts with unread messages
+		for _, contact := range a.contacts {
+			if contact.Unread > 0 {
+				unreadChats++
+			}
+		}
+
+		result = append(result, AccountDisplayInfo{
+			JID:         acc.JID,
+			Status:      status,
+			UnreadMsgs:  unreadMsgs,
+			UnreadChats: unreadChats,
+			Server:      acc.Server,
+			Port:        acc.Port,
+			Resource:    acc.Resource,
+			OMEMO:       acc.OMEMO,
+			Session:     acc.Session,
+			AutoConnect: acc.AutoConnect,
+		})
+	}
+	return result
+}
+
 // GetAccountUnreadCount returns the unread count for a specific account
 func (a *App) GetAccountUnreadCount(jid string) int {
 	a.mu.RLock()
@@ -748,6 +822,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		a.mu.Lock()
 		a.status = "connecting"
 		a.currentAccount = jidStr
+		a.accountStatuses[jidStr] = "connecting" // Update account-specific status
 		// Disconnect existing client if any
 		if a.xmppClient != nil {
 			_ = a.xmppClient.Disconnect()
@@ -770,6 +845,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.mu.Lock()
 			a.connected = false
 			a.status = "failed"
+			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
 			return ConnectResultMsg{
 				Success: false,
@@ -787,6 +863,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.mu.Lock()
 			a.connected = false
 			a.status = "offline"
+			a.accountStatuses[jidStr] = "offline"
 			a.mu.Unlock()
 			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
 		})
@@ -812,6 +889,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.mu.Lock()
 			a.connected = false
 			a.status = "failed"
+			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
 			return ConnectResultMsg{
 				Success: false,
@@ -826,6 +904,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		a.connected = true
 		a.currentAccount = jidStr
 		a.status = "online"
+		a.accountStatuses[jidStr] = "online"
 		a.mu.Unlock()
 
 		// Add session account if needed
@@ -875,15 +954,48 @@ func (a *App) DoConnect(jidStr string) tea.Cmd {
 func (a *App) Disconnect() tea.Cmd {
 	return func() tea.Msg {
 		a.mu.Lock()
+		currentAcc := a.currentAccount
 		if a.xmppClient != nil {
 			_ = a.xmppClient.Disconnect()
 			a.xmppClient = nil
 		}
 		a.connected = false
 		a.status = "offline"
+		if currentAcc != "" {
+			a.accountStatuses[currentAcc] = "offline"
+		}
 		a.mu.Unlock()
 
 		a.sendEvent(EventMsg{Type: EventDisconnected})
 		return nil
 	}
+}
+
+// AddContact adds a contact to the roster and sends a subscription request
+func (a *App) AddContact(contactJID, name, group string) error {
+	a.mu.RLock()
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	// Build groups slice
+	var groups []string
+	if group != "" {
+		groups = []string{group}
+	}
+
+	// Add to roster
+	if err := client.AddContact(contactJID, name, groups); err != nil {
+		return fmt.Errorf("failed to add contact: %w", err)
+	}
+
+	// Send subscription request
+	if err := client.Subscribe(contactJID); err != nil {
+		return fmt.Errorf("failed to subscribe: %w", err)
+	}
+
+	return nil
 }

@@ -487,6 +487,74 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 
 	case keybindings.ActionShowContextHelp:
 		m.showContextHelp()
+
+	// Account actions - work when focused on accounts section
+	case keybindings.ActionAccountConnect:
+		if m.focus == FocusAccounts || (m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionAccounts) {
+			if jid := m.roster.SelectedAccountJID(); jid != "" {
+				// Check account status
+				accounts := m.app.GetAllAccountsDisplay()
+				for _, acc := range accounts {
+					if acc.JID == jid {
+						if acc.Status == "online" {
+							// Already connected
+							m.dialog = m.dialog.ShowError("Account " + jid + " is already connected.")
+							m.focus = FocusDialog
+						} else {
+							// Connect to account
+							return m.app.ExecuteCommand("connect", []string{jid})
+						}
+						break
+					}
+				}
+			}
+		}
+
+	case keybindings.ActionAccountDisconnect:
+		if m.focus == FocusAccounts || (m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionAccounts) {
+			if jid := m.roster.SelectedAccountJID(); jid != "" {
+				// Check account status
+				accounts := m.app.GetAllAccountsDisplay()
+				for _, acc := range accounts {
+					if acc.JID == jid {
+						if acc.Status == "online" || acc.Status == "connecting" {
+							// Disconnect
+							m.app.SetAccountStatus(jid, "offline")
+							return m.app.ExecuteCommand("disconnect", nil)
+						} else {
+							m.dialog = m.dialog.ShowError("Account " + jid + " is not connected.")
+							m.focus = FocusDialog
+						}
+						break
+					}
+				}
+			}
+		}
+
+	case keybindings.ActionAccountRemove:
+		if m.focus == FocusAccounts || (m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionAccounts) {
+			if jid := m.roster.SelectedAccountJID(); jid != "" {
+				// Show confirmation dialog
+				acc := m.app.GetAccount(jid)
+				isSession := false
+				if acc != nil {
+					isSession = acc.Session
+				}
+				m.dialog = m.dialog.ShowAccountRemoveConfirm(jid, isSession)
+				m.focus = FocusDialog
+			}
+		}
+
+	case keybindings.ActionAccountEdit:
+		if m.focus == FocusAccounts || (m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionAccounts) {
+			if jid := m.roster.SelectedAccountJID(); jid != "" {
+				acc := m.app.GetAccount(jid)
+				if acc != nil {
+					m.dialog = m.dialog.ShowAccountEdit(acc.JID, acc.Server, acc.Port, acc.Resource)
+					m.focus = FocusDialog
+				}
+			}
+		}
 	}
 
 	return nil
@@ -529,21 +597,13 @@ func (m *Model) showContextHelp() {
 		// Show selected contact info
 		title = "Contact Info"
 		if m.roster.FocusSection() == roster.SectionAccounts {
-			title = "Account Info"
-			jid := m.roster.SelectedAccountJID()
-			if jid == "" {
-				content = "No account selected.\n\nUse j/k to navigate,\ngA to focus accounts section."
+			// Use inline tooltip for accounts - toggle it on/off
+			if m.roster.IsAccountTooltipVisible() {
+				m.roster = m.roster.HideAccountTooltip()
 			} else {
-				accounts := m.app.GetConnectedAccounts()
-				for _, acc := range accounts {
-					if acc.JID == jid {
-						content = "JID: " + acc.JID + "\n"
-						content += "Status: " + acc.Status + "\n"
-						content += "Unread: " + strconv.Itoa(acc.Unread)
-						break
-					}
-				}
+				m.roster = m.roster.ShowAccountTooltip()
 			}
+			return // Don't show dialog for accounts
 		} else {
 			jid := m.roster.SelectedJID()
 			if jid == "" {
@@ -568,22 +628,13 @@ func (m *Model) showContextHelp() {
 		}
 
 	case FocusAccounts:
-		// Show account details
-		title = "Account Details"
-		jid := m.roster.SelectedAccountJID()
-		if jid == "" {
-			content = "No account selected."
+		// Use inline tooltip for accounts - toggle it on/off
+		if m.roster.IsAccountTooltipVisible() {
+			m.roster = m.roster.HideAccountTooltip()
 		} else {
-			accounts := m.app.GetConnectedAccounts()
-			for _, acc := range accounts {
-				if acc.JID == jid {
-					content = "JID: " + acc.JID + "\n"
-					content += "Status: " + acc.Status + "\n"
-					content += "Unread: " + strconv.Itoa(acc.Unread)
-					break
-				}
-			}
+			m.roster = m.roster.ShowAccountTooltip()
 		}
+		return // Don't show dialog for accounts
 
 	default:
 		// General help
@@ -614,6 +665,7 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen-1] + "…"
 }
+
 
 // updateFocusedComponent sends the key message to the focused component
 func (m *Model) updateFocusedComponent(msg tea.KeyMsg) []tea.Cmd {
@@ -729,15 +781,22 @@ func (m *Model) updateComponentSizes() {
 	m.commandline = m.commandline.SetWidth(m.width)
 }
 
-// getAccountDisplays converts connected accounts to roster display format
+// getAccountDisplays converts all accounts to roster display format
 func (m Model) getAccountDisplays() []roster.AccountDisplay {
-	accounts := m.app.GetConnectedAccounts()
+	accounts := m.app.GetAllAccountsDisplay()
 	displays := make([]roster.AccountDisplay, len(accounts))
 	for i, acc := range accounts {
 		displays[i] = roster.AccountDisplay{
-			JID:    acc.JID,
-			Status: acc.Status,
-			Unread: acc.Unread,
+			JID:         acc.JID,
+			Status:      acc.Status,
+			UnreadMsgs:  acc.UnreadMsgs,
+			UnreadChats: acc.UnreadChats,
+			Server:      acc.Server,
+			Port:        acc.Port,
+			Resource:    acc.Resource,
+			OMEMO:       acc.OMEMO,
+			Session:     acc.Session,
+			AutoConnect: acc.AutoConnect,
 		}
 	}
 	return displays
@@ -836,20 +895,18 @@ func (m *Model) loadWindows() {
 func (m *Model) overlayDialog(base string) string {
 	dialogView := m.dialog.View()
 
-	// Center the dialog
-	dialogWidth := 50
-	dialogHeight := 10
-
-	x := (m.width - dialogWidth) / 2
-	y := (m.height - dialogHeight) / 2
-
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
+	// Use different positioning for context help - position it on the right side
+	if m.dialog.Type() == dialogs.DialogContextHelp {
+		// Position context help popup on the right, near the top
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Right, lipgloss.Top,
+			dialogView,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(lipgloss.Color("0")),
+		)
 	}
 
+	// Center other dialogs
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		dialogView,
@@ -869,6 +926,7 @@ func (m *Model) overlaySettings(base string) string {
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("0")),
 	)
 }
+
 
 // handleCommandAction handles command actions that need UI interaction
 func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
@@ -894,7 +952,7 @@ func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
 		if jid, ok := msg.Data["jid"].(string); ok {
 			acc := m.app.GetAccount(jid)
 			if acc != nil {
-				m.dialog = m.dialog.ShowAccountEdit(acc.JID, acc.Server, acc.Port)
+				m.dialog = m.dialog.ShowAccountEdit(acc.JID, acc.Server, acc.Port, acc.Resource)
 				m.focus = FocusDialog
 			}
 		}
@@ -949,11 +1007,15 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 			password := result.Values["password"]
 			server := result.Values["server"]
 			portStr := result.Values["port"]
+			resource := result.Values["resource"]
 			port := 5222
 			if portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil {
 					port = p
 				}
+			}
+			if resource == "" {
+				resource = "roster"
 			}
 
 			acc := config.Account{
@@ -963,7 +1025,7 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				Port:        port,
 				AutoConnect: true,
 				OMEMO:       true,
-				Resource:    "roster",
+				Resource:    resource,
 			}
 			m.app.AddAccount(acc)
 		}
@@ -974,6 +1036,7 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 			password := result.Values["password"]
 			server := result.Values["server"]
 			portStr := result.Values["port"]
+			resource := result.Values["resource"]
 			port := 5222
 			if portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil {
@@ -989,6 +1052,9 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				}
 				acc.Server = server
 				acc.Port = port
+				if resource != "" {
+					acc.Resource = resource
+				}
 				m.app.AddAccount(*acc)
 			}
 		}
@@ -1023,12 +1089,37 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 
 	case dialogs.DialogAddContact:
 		if result.Confirmed {
-			// TODO: Add contact via XMPP
+			jid := result.Values["jid"]
+			name := result.Values["name"]
+			group := result.Values["group"]
+			if jid != "" {
+				if err := m.app.AddContact(jid, name, group); err != nil {
+					// Could show error in status bar
+					_ = err
+				}
+			}
 		}
 
 	case dialogs.DialogJoinRoom:
 		if result.Confirmed {
 			// TODO: Join room via XMPP
+		}
+
+	case dialogs.DialogAccountRemove:
+		if result.Confirmed {
+			jid := result.Values["jid"]
+			if jid != "" {
+				// Disconnect if connected
+				accounts := m.app.GetAllAccountsDisplay()
+				for _, acc := range accounts {
+					if acc.JID == jid && (acc.Status == "online" || acc.Status == "connecting") {
+						m.app.SetAccountStatus(jid, "offline")
+						break
+					}
+				}
+				// Remove the account
+				m.app.RemoveAccount(jid)
+			}
 		}
 	}
 

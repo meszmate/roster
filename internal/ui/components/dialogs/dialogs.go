@@ -29,6 +29,7 @@ const (
 	DialogPassword
 	DialogSettings
 	DialogContextHelp
+	DialogAccountRemove
 )
 
 // DialogResult is sent when a dialog is closed
@@ -196,6 +197,12 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	sb.WriteString("  gc        Focus chat\n")
 	sb.WriteString("  gA        Focus accounts\n")
 	sb.WriteString("  gl        Toggle account list\n")
+	sb.WriteString("\nAccount Actions (in accounts section):\n")
+	sb.WriteString("  H         Show account info tooltip\n")
+	sb.WriteString("  C         Connect account\n")
+	sb.WriteString("  D         Disconnect account\n")
+	sb.WriteString("  E         Edit account\n")
+	sb.WriteString("  X         Remove account\n")
 	sb.WriteString("\nActions (g prefix):\n")
 	sb.WriteString("  ga        Add contact\n")
 	sb.WriteString("  gx        Remove contact\n")
@@ -212,6 +219,8 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	cmdList := []string{
 		"connect <jid> <pass> [server] [port]",
 		"account add    - Add saved account",
+		"account edit <jid> - Edit account",
+		"account resource <jid> <name> - Set resource",
 		"disconnect     - Disconnect",
 		"1-20           - Switch window",
 		"set <k> <v>    - Change setting",
@@ -239,6 +248,7 @@ func (m Model) ShowAccountAdd() Model {
 		{Label: "Password", Key: "password", Value: "", Password: true},
 		{Label: "Server (optional)", Key: "server", Value: ""},
 		{Label: "Port (default: 5222)", Key: "port", Value: ""},
+		{Label: "Resource (default: roster)", Key: "resource", Value: ""},
 	}
 	m.activeInput = 0
 	m.buttons = []string{"Add", "Cancel"}
@@ -247,7 +257,7 @@ func (m Model) ShowAccountAdd() Model {
 }
 
 // ShowAccountEdit shows the edit account dialog
-func (m Model) ShowAccountEdit(jid, server string, port int) Model {
+func (m Model) ShowAccountEdit(jid, server string, port int, resource string) Model {
 	m.dialogType = DialogAccountEdit
 	m.title = "Edit Account"
 	m.message = ""
@@ -260,6 +270,7 @@ func (m Model) ShowAccountEdit(jid, server string, port int) Model {
 		{Label: "New Password (leave empty to keep)", Key: "password", Value: "", Password: true},
 		{Label: "Server", Key: "server", Value: server},
 		{Label: "Port", Key: "port", Value: portStr},
+		{Label: "Resource", Key: "resource", Value: resource},
 	}
 	m.activeInput = 0
 	m.buttons = []string{"Save", "Cancel"}
@@ -375,6 +386,27 @@ func (m Model) ShowContextHelp(context string, content string) Model {
 	m.buttons = []string{"Close"}
 	m.activeBtn = 0
 	m.inputs = nil
+	return m
+}
+
+// ShowAccountRemoveConfirm shows a confirmation dialog for removing an account
+func (m Model) ShowAccountRemoveConfirm(jid string, isSession bool) Model {
+	m.dialogType = DialogAccountRemove
+	m.title = "Remove Account"
+
+	accountType := "saved"
+	if isSession {
+		accountType = "session"
+	}
+
+	m.message = "Are you sure you want to remove this " + accountType + " account?\n\n" +
+		"  " + jid + "\n\n" +
+		"This action cannot be undone."
+
+	m.buttons = []string{"Remove", "Cancel"}
+	m.activeBtn = 1 // Default to Cancel for safety
+	m.inputs = nil
+	m.data["jid"] = jid
 	return m
 }
 
@@ -558,10 +590,16 @@ func (m Model) View() string {
 	}
 	b.WriteString(strings.Join(buttons, "  "))
 
-	// Wrap in border
+	// Wrap in border - use smaller size for context help
 	content := b.String()
+	width := 50
+	padding := 1
+	if m.dialogType == DialogContextHelp {
+		width = 40 // Smaller width for context help
+		padding = 0
+	}
 	return m.styles.DialogBorder.
-		Width(50).
-		Padding(1, 2).
+		Width(width).
+		Padding(padding, 2).
 		Render(content)
 }
