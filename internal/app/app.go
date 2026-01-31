@@ -1,0 +1,889 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/meszmate/roster/internal/config"
+	"github.com/meszmate/roster/internal/ui/components/chat"
+	"github.com/meszmate/roster/internal/ui/components/roster"
+	"github.com/meszmate/roster/internal/xmpp"
+)
+
+// EventType represents the type of event
+type EventType int
+
+const (
+	EventRosterUpdate EventType = iota
+	EventMessage
+	EventPresence
+	EventConnected
+	EventDisconnected
+	EventError
+	EventMUCJoined
+	EventMUCLeft
+	EventMUCMessage
+	EventTyping
+	EventReceipt
+)
+
+// EventMsg represents an event from the app layer
+type EventMsg struct {
+	Type EventType
+	Data interface{}
+}
+
+// ChatMessage represents a chat message
+type ChatMessage struct {
+	ID        string
+	From      string
+	To        string
+	Body      string
+	Timestamp time.Time
+	Encrypted bool
+	Type      string
+	Outgoing  bool
+}
+
+// PresenceUpdate represents a presence update
+type PresenceUpdate struct {
+	JID       string
+	Status    string
+	StatusMsg string
+}
+
+// CommandAction represents a command that needs UI interaction
+type CommandAction int
+
+const (
+	ActionShowHelp CommandAction = iota
+	ActionShowAccountList
+	ActionShowAccountAdd
+	ActionShowAccountEdit
+	ActionShowPassword
+	ActionShowSettings
+	ActionSwitchWindow
+	ActionWindowNext
+	ActionWindowPrev
+	ActionSaveWindows
+	ActionLoadWindows
+)
+
+// CommandActionMsg is sent when a command needs UI interaction
+type CommandActionMsg struct {
+	Action CommandAction
+	Data   map[string]interface{}
+}
+
+// ConnectResultMsg is sent when a connection attempt completes
+type ConnectResultMsg struct {
+	Success bool
+	JID     string
+	Error   string
+}
+
+// ConnectingMsg is sent when connection is starting
+type ConnectingMsg struct {
+	JID string
+}
+
+// App represents the main application
+type App struct {
+	cfg       *config.Config
+	accounts  *config.AccountsConfig
+	program   *tea.Program
+	events    chan EventMsg
+	ctx       context.Context
+	cancel    context.CancelFunc
+
+	// XMPP client
+	xmppClient *xmpp.Client
+
+	// State
+	mu             sync.RWMutex
+	connected      bool
+	currentAccount string
+	status         string
+	statusMsg      string
+	contacts       []roster.Contact
+	chatHistory    map[string][]chat.Message
+
+	// Multi-account state
+	accountStatuses map[string]string // JID -> status (online, connecting, failed, offline)
+	accountUnreads  map[string]int    // JID -> unread count
+}
+
+// New creates a new App instance
+func New(cfg *config.Config) (*App, error) {
+	accounts, err := config.LoadAccounts()
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	app := &App{
+		cfg:             cfg,
+		accounts:        accounts,
+		events:          make(chan EventMsg, 100),
+		ctx:             ctx,
+		cancel:          cancel,
+		status:          "offline",
+		chatHistory:     make(map[string][]chat.Message),
+		accountStatuses: make(map[string]string),
+		accountUnreads:  make(map[string]int),
+	}
+
+	return app, nil
+}
+
+// Config returns the configuration
+func (a *App) Config() *config.Config {
+	return a.cfg
+}
+
+// SetProgram sets the Bubble Tea program reference
+func (a *App) SetProgram(p *tea.Program) {
+	a.program = p
+}
+
+// Init returns an initialization command
+func (a *App) Init() tea.Cmd {
+	return tea.Batch(
+		a.listenForEvents(),
+		a.autoConnect(),
+	)
+}
+
+// listenForEvents listens for events and sends them to the UI
+func (a *App) listenForEvents() tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case event := <-a.events:
+			return event
+		case <-a.ctx.Done():
+			return nil
+		}
+	}
+}
+
+// autoConnect auto-connects to accounts if configured
+func (a *App) autoConnect() tea.Cmd {
+	return func() tea.Msg {
+		if !a.cfg.General.AutoConnect {
+			return nil
+		}
+
+		for _, account := range a.accounts.Accounts {
+			if account.AutoConnect {
+				// Connection will be handled by XMPP client
+				a.currentAccount = account.JID
+				break
+			}
+		}
+
+		return nil
+	}
+}
+
+// sendEvent sends an event to the UI
+func (a *App) sendEvent(event EventMsg) {
+	select {
+	case a.events <- event:
+	default:
+		// Channel full, drop event
+	}
+
+	// Also send directly to program if available
+	if a.program != nil {
+		a.program.Send(event)
+	}
+}
+
+// Close closes the app
+func (a *App) Close() {
+	a.cancel()
+	close(a.events)
+}
+
+// Connected returns whether we're connected
+func (a *App) Connected() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.connected
+}
+
+// CurrentAccount returns the current account JID
+func (a *App) CurrentAccount() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.currentAccount
+}
+
+// Status returns the current status
+func (a *App) Status() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.status
+}
+
+// SetStatus sets the current status
+func (a *App) SetStatus(status, statusMsg string) {
+	a.mu.Lock()
+	a.status = status
+	a.statusMsg = statusMsg
+	a.mu.Unlock()
+}
+
+// GetContacts returns the roster contacts
+func (a *App) GetContacts() []roster.Contact {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.contacts
+}
+
+// SetContacts sets the roster contacts
+func (a *App) SetContacts(contacts []roster.Contact) {
+	a.mu.Lock()
+	a.contacts = contacts
+	a.mu.Unlock()
+
+	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+}
+
+// GetChatHistory returns chat history for a JID
+func (a *App) GetChatHistory(jid string) []chat.Message {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.chatHistory[jid]
+}
+
+// AddChatMessage adds a message to chat history
+func (a *App) AddChatMessage(jid string, msg chat.Message) {
+	a.mu.Lock()
+	a.chatHistory[jid] = append(a.chatHistory[jid], msg)
+	a.mu.Unlock()
+
+	a.sendEvent(EventMsg{Type: EventMessage, Data: msg})
+}
+
+// ExecuteCommand executes a command
+func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
+	return func() tea.Msg {
+		switch cmd {
+		// General commands
+		case "quit", "q":
+			return tea.Quit()
+
+		case "help", "h":
+			return CommandActionMsg{Action: ActionShowHelp}
+
+		// Account management
+		case "account":
+			if len(args) == 0 {
+				return CommandActionMsg{Action: ActionShowAccountList}
+			}
+			switch args[0] {
+			case "list":
+				return CommandActionMsg{Action: ActionShowAccountList}
+			case "add":
+				return CommandActionMsg{Action: ActionShowAccountAdd}
+			case "edit":
+				if len(args) > 1 {
+					return CommandActionMsg{
+						Action: ActionShowAccountEdit,
+						Data:   map[string]interface{}{"jid": args[1]},
+					}
+				}
+				return CommandActionMsg{Action: ActionShowAccountList}
+			case "remove":
+				if len(args) > 1 {
+					a.RemoveAccount(args[1])
+				}
+				return nil
+			case "default":
+				if len(args) > 1 {
+					a.SetDefaultAccount(args[1])
+				}
+				return nil
+			}
+			return nil
+
+		case "connect":
+			jidStr := ""
+
+			if len(args) >= 2 {
+				// Session-only connection: :connect user@server.com password [server] [port]
+				jidStr = args[0]
+				password := args[1]
+				server := ""
+				port := 5222
+				if len(args) >= 3 {
+					server = args[2]
+				}
+				if len(args) >= 4 {
+					if p, err := strconv.Atoi(args[3]); err == nil {
+						port = p
+					}
+				}
+
+				// Create session account immediately so DoConnect can find it
+				acc := config.Account{
+					JID:      jidStr,
+					Password: password,
+					Server:   server,
+					Port:     port,
+					Resource: "roster",
+					OMEMO:    true,
+					Session:  true,
+				}
+				a.AddSessionAccount(acc)
+			} else if len(args) == 1 {
+				jidStr = args[0]
+			} else if a.currentAccount != "" {
+				jidStr = a.currentAccount
+			} else if len(a.accounts.Accounts) > 0 {
+				// Use first non-session account
+				for _, acc := range a.accounts.Accounts {
+					if !acc.Session {
+						jidStr = acc.JID
+						break
+					}
+				}
+			}
+
+			if jidStr == "" {
+				return CommandActionMsg{Action: ActionShowAccountAdd}
+			}
+
+			// Check if we have an account with password
+			acc := a.GetAccount(jidStr)
+			if acc == nil {
+				// Account doesn't exist, prompt for password (session connection)
+				return CommandActionMsg{
+					Action: ActionShowPassword,
+					Data:   map[string]interface{}{"jid": jidStr, "session": true},
+				}
+			}
+
+			if acc.Password == "" && !acc.UseKeyring {
+				// Need password
+				return CommandActionMsg{
+					Action: ActionShowPassword,
+					Data:   map[string]interface{}{"jid": jidStr, "session": acc.Session},
+				}
+			}
+
+			// Store connection details and return connecting message
+			// The UI will trigger the actual connection
+			a.mu.Lock()
+			a.status = "connecting"
+			a.currentAccount = jidStr
+			a.mu.Unlock()
+
+			// Return connecting message first, then do actual connection
+			return ConnectingMsg{JID: jidStr}
+
+		case "disconnect":
+			return a.Disconnect()()
+
+		// Settings
+		case "settings":
+			return CommandActionMsg{Action: ActionShowSettings}
+
+		case "set":
+			if len(args) == 0 {
+				return CommandActionMsg{Action: ActionShowSettings}
+			}
+			if len(args) >= 2 {
+				a.SetSetting(args[0], args[1])
+			}
+			return nil
+
+		// Status commands
+		case "status", "away", "dnd", "xa", "online", "offline":
+			status := cmd
+			if cmd == "status" && len(args) > 0 {
+				status = args[0]
+			}
+			msg := ""
+			if len(args) > 1 {
+				msg = args[1]
+			} else if cmd != "status" && len(args) > 0 {
+				msg = args[0]
+			}
+			a.SetStatus(status, msg)
+			return nil
+
+		// Messaging
+		case "msg":
+			if len(args) >= 2 {
+				jid := args[0]
+				body := args[1]
+				msg := chat.Message{
+					From:      a.currentAccount,
+					To:        jid,
+					Body:      body,
+					Timestamp: time.Now(),
+					Outgoing:  true,
+				}
+				a.AddChatMessage(jid, msg)
+			}
+			return nil
+
+		// Window switching (like TTY: :1, :2, etc.)
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+			"11", "12", "13", "14", "15", "16", "17", "18", "19", "20":
+			return CommandActionMsg{
+				Action: ActionSwitchWindow,
+				Data:   map[string]interface{}{"window": cmd},
+			}
+
+		case "window", "win", "w":
+			if len(args) > 0 {
+				return CommandActionMsg{
+					Action: ActionSwitchWindow,
+					Data:   map[string]interface{}{"window": args[0]},
+				}
+			}
+			return nil
+
+		case "wn", "wnext":
+			return CommandActionMsg{Action: ActionWindowNext}
+
+		case "wp", "wprev":
+			return CommandActionMsg{Action: ActionWindowPrev}
+
+		// Roster commands
+		case "roster":
+			// Toggle handled by UI
+			return nil
+
+		case "add":
+			if len(args) >= 1 {
+				// TODO: Add contact via XMPP
+			}
+			return nil
+
+		case "remove":
+			if len(args) >= 1 {
+				// TODO: Remove contact via XMPP
+			}
+			return nil
+
+		// Window management
+		case "savew", "savewindows":
+			return CommandActionMsg{Action: ActionSaveWindows}
+
+		case "loadw", "loadwindows":
+			return CommandActionMsg{Action: ActionLoadWindows}
+
+		default:
+			// Unknown command
+			return nil
+		}
+	}
+}
+
+// RemoveAccount removes an account from the configuration
+func (a *App) RemoveAccount(jid string) {
+	for i, acc := range a.accounts.Accounts {
+		if acc.JID == jid {
+			isSession := acc.Session
+			a.accounts.Accounts = append(a.accounts.Accounts[:i], a.accounts.Accounts[i+1:]...)
+			// Only save if it wasn't a session account
+			if !isSession {
+				_ = config.SaveAccounts(a.accounts)
+			}
+			break
+		}
+	}
+}
+
+// SetDefaultAccount sets the default account
+func (a *App) SetDefaultAccount(jid string) {
+	for i := range a.accounts.Accounts {
+		if !a.accounts.Accounts[i].Session {
+			a.accounts.Accounts[i].AutoConnect = (a.accounts.Accounts[i].JID == jid)
+		}
+	}
+	_ = config.SaveAccounts(a.accounts)
+}
+
+// AddAccount adds a new persistent account (saved to disk)
+func (a *App) AddAccount(acc config.Account) {
+	acc.Session = false // Ensure it's not a session account
+	// Check if account already exists
+	for i, existing := range a.accounts.Accounts {
+		if existing.JID == acc.JID {
+			a.accounts.Accounts[i] = acc
+			_ = config.SaveAccounts(a.accounts)
+			return
+		}
+	}
+	a.accounts.Accounts = append(a.accounts.Accounts, acc)
+	_ = config.SaveAccounts(a.accounts)
+}
+
+// AddSessionAccount adds a session-only account (not saved to disk)
+func (a *App) AddSessionAccount(acc config.Account) {
+	acc.Session = true
+	// Check if account already exists
+	for i, existing := range a.accounts.Accounts {
+		if existing.JID == acc.JID {
+			a.accounts.Accounts[i] = acc
+			return // Don't save session accounts
+		}
+	}
+	a.accounts.Accounts = append(a.accounts.Accounts, acc)
+	// Don't save to disk
+}
+
+// SetSetting sets a configuration setting
+func (a *App) SetSetting(key, value string) {
+	switch key {
+	case "theme":
+		a.cfg.UI.Theme = value
+	case "roster_width":
+		if w, err := strconv.Atoi(value); err == nil {
+			a.cfg.UI.RosterWidth = w
+		}
+	case "roster_position":
+		a.cfg.UI.RosterPosition = value
+	case "show_timestamps":
+		a.cfg.UI.ShowTimestamps = (value == "true" || value == "on" || value == "1")
+	case "time_format":
+		a.cfg.UI.TimeFormat = value
+	case "notifications":
+		a.cfg.UI.Notifications = (value == "true" || value == "on" || value == "1")
+	case "encryption", "default_encryption":
+		a.cfg.Encryption.Default = value
+	case "require_encryption":
+		a.cfg.Encryption.RequireEncryption = (value == "true" || value == "on" || value == "1")
+	}
+	_ = config.Save(a.cfg)
+}
+
+// GetSettings returns current settings as a map
+func (a *App) GetSettings() map[string]string {
+	return map[string]string{
+		"theme":              a.cfg.UI.Theme,
+		"roster_width":       strconv.Itoa(a.cfg.UI.RosterWidth),
+		"roster_position":    a.cfg.UI.RosterPosition,
+		"show_timestamps":    strconv.FormatBool(a.cfg.UI.ShowTimestamps),
+		"time_format":        a.cfg.UI.TimeFormat,
+		"notifications":      strconv.FormatBool(a.cfg.UI.Notifications),
+		"encryption":         a.cfg.Encryption.Default,
+		"require_encryption": strconv.FormatBool(a.cfg.Encryption.RequireEncryption),
+	}
+}
+
+// AccountInfo holds account info for display
+type AccountInfo struct {
+	JID     string
+	Session bool
+}
+
+// ConnectedAccount represents a connected account with status info
+type ConnectedAccount struct {
+	JID       string
+	Status    string // online, connecting, failed, offline
+	Unread    int    // Total unread across all contacts for this account
+	Connected bool
+}
+
+// GetAccountJIDs returns a list of account JIDs (for backward compatibility)
+func (a *App) GetAccountJIDs() []string {
+	jids := make([]string, len(a.accounts.Accounts))
+	for i, acc := range a.accounts.Accounts {
+		jids[i] = acc.JID
+	}
+	return jids
+}
+
+// GetAccountInfos returns account info for display
+func (a *App) GetAccountInfos() []AccountInfo {
+	infos := make([]AccountInfo, len(a.accounts.Accounts))
+	for i, acc := range a.accounts.Accounts {
+		infos[i] = AccountInfo{
+			JID:     acc.JID,
+			Session: acc.Session,
+		}
+	}
+	return infos
+}
+
+// Accounts returns the account configurations
+func (a *App) Accounts() []config.Account {
+	return a.accounts.Accounts
+}
+
+// GetAccount returns an account by JID
+func (a *App) GetAccount(jid string) *config.Account {
+	for i := range a.accounts.Accounts {
+		if a.accounts.Accounts[i].JID == jid {
+			return &a.accounts.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// GetConnectedAccounts returns a list of all accounts with their connection status
+func (a *App) GetConnectedAccounts() []ConnectedAccount {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var result []ConnectedAccount
+	for _, acc := range a.accounts.Accounts {
+		status := a.accountStatuses[acc.JID]
+		if status == "" {
+			status = "offline"
+		}
+		unread := a.accountUnreads[acc.JID]
+		connected := status == "online"
+
+		result = append(result, ConnectedAccount{
+			JID:       acc.JID,
+			Status:    status,
+			Unread:    unread,
+			Connected: connected,
+		})
+	}
+	return result
+}
+
+// GetAccountUnreadCount returns the unread count for a specific account
+func (a *App) GetAccountUnreadCount(jid string) int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.accountUnreads[jid]
+}
+
+// SetAccountStatus sets the status for a specific account
+func (a *App) SetAccountStatus(jid, status string) {
+	a.mu.Lock()
+	a.accountStatuses[jid] = status
+	a.mu.Unlock()
+}
+
+// IncrementAccountUnread increments the unread count for an account
+func (a *App) IncrementAccountUnread(jid string) {
+	a.mu.Lock()
+	a.accountUnreads[jid]++
+	a.mu.Unlock()
+}
+
+// ClearAccountUnread clears the unread count for an account
+func (a *App) ClearAccountUnread(jid string) {
+	a.mu.Lock()
+	a.accountUnreads[jid] = 0
+	a.mu.Unlock()
+}
+
+// SwitchActiveAccount switches to a different account
+func (a *App) SwitchActiveAccount(jid string) {
+	a.mu.Lock()
+	a.currentAccount = jid
+	a.mu.Unlock()
+}
+
+// WindowState represents a saved window
+type WindowState struct {
+	Type   string `json:"type"`   // "console", "chat", "muc"
+	JID    string `json:"jid"`    // JID for chat/muc windows
+	Title  string `json:"title"`  // Window title
+	Active bool   `json:"active"` // Whether this was the active window
+}
+
+// SaveWindowState saves the current window state to a file
+func (a *App) SaveWindowState(windows []WindowState) error {
+	paths, err := config.GetPaths()
+	if err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(windows, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	windowsFile := filepath.Join(paths.DataDir, "windows.json")
+	return os.WriteFile(windowsFile, data, 0600)
+}
+
+// LoadWindowState loads the saved window state from a file
+func (a *App) LoadWindowState() ([]WindowState, error) {
+	paths, err := config.GetPaths()
+	if err != nil {
+		return nil, err
+	}
+
+	windowsFile := filepath.Join(paths.DataDir, "windows.json")
+	data, err := os.ReadFile(windowsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // No saved state
+		}
+		return nil, err
+	}
+
+	var windows []WindowState
+	if err := json.Unmarshal(data, &windows); err != nil {
+		return nil, err
+	}
+
+	return windows, nil
+}
+
+// doConnect performs the actual XMPP connection
+func (a *App) doConnect(jidStr, password, server string, port int, isSession bool) tea.Cmd {
+	return func() tea.Msg {
+		// Set connecting status
+		a.mu.Lock()
+		a.status = "connecting"
+		a.currentAccount = jidStr
+		// Disconnect existing client if any
+		if a.xmppClient != nil {
+			_ = a.xmppClient.Disconnect()
+			a.xmppClient = nil
+		}
+		a.mu.Unlock()
+
+		// Notify UI of status change
+		a.sendEvent(EventMsg{Type: EventPresence})
+
+		// Create new client
+		client, err := xmpp.NewClient(xmpp.ClientConfig{
+			JID:      jidStr,
+			Password: password,
+			Server:   server,
+			Port:     port,
+			Resource: "roster",
+		})
+		if err != nil {
+			a.mu.Lock()
+			a.connected = false
+			a.status = "failed"
+			a.mu.Unlock()
+			return ConnectResultMsg{
+				Success: false,
+				JID:     jidStr,
+				Error:   "Invalid JID: " + err.Error(),
+			}
+		}
+
+		// Set up handlers
+		client.SetConnectHandler(func() {
+			a.sendEvent(EventMsg{Type: EventConnected})
+		})
+
+		client.SetDisconnectHandler(func(err error) {
+			a.mu.Lock()
+			a.connected = false
+			a.status = "offline"
+			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
+		})
+
+		client.SetErrorHandler(func(err error) {
+			a.sendEvent(EventMsg{Type: EventError, Data: err})
+		})
+
+		client.SetMessageHandler(func(msg xmpp.Message) {
+			chatMsg := chat.Message{
+				From:      msg.From.String(),
+				To:        msg.To.String(),
+				Body:      msg.Body,
+				Timestamp: msg.Timestamp,
+				Encrypted: msg.Encrypted,
+				Outgoing:  false,
+			}
+			a.AddChatMessage(msg.From.Bare().String(), chatMsg)
+		})
+
+		// Attempt to connect
+		if err := client.Connect(); err != nil {
+			a.mu.Lock()
+			a.connected = false
+			a.status = "failed"
+			a.mu.Unlock()
+			return ConnectResultMsg{
+				Success: false,
+				JID:     jidStr,
+				Error:   err.Error(),
+			}
+		}
+
+		// Connection successful
+		a.mu.Lock()
+		a.xmppClient = client
+		a.connected = true
+		a.currentAccount = jidStr
+		a.status = "online"
+		a.mu.Unlock()
+
+		// Add session account if needed
+		if isSession {
+			acc := config.Account{
+				JID:      jidStr,
+				Password: password,
+				Server:   server,
+				Port:     port,
+				Resource: "roster",
+				OMEMO:    true,
+				Session:  true,
+			}
+			a.AddSessionAccount(acc)
+		}
+
+		return ConnectResultMsg{
+			Success: true,
+			JID:     jidStr,
+		}
+	}
+}
+
+// DoConnect starts the actual connection process
+// Call this after showing "Connecting..." status to the user
+func (a *App) DoConnect(jidStr string) tea.Cmd {
+	// Find account details
+	acc := a.GetAccount(jidStr)
+	if acc == nil {
+		a.mu.Lock()
+		a.connected = false
+		a.status = "failed"
+		a.mu.Unlock()
+		return func() tea.Msg {
+			return ConnectResultMsg{
+				Success: false,
+				JID:     jidStr,
+				Error:   "Account not found",
+			}
+		}
+	}
+
+	return a.doConnect(acc.JID, acc.Password, acc.Server, acc.Port, acc.Session)
+}
+
+// Disconnect disconnects from the XMPP server
+func (a *App) Disconnect() tea.Cmd {
+	return func() tea.Msg {
+		a.mu.Lock()
+		if a.xmppClient != nil {
+			_ = a.xmppClient.Disconnect()
+			a.xmppClient = nil
+		}
+		a.connected = false
+		a.status = "offline"
+		a.mu.Unlock()
+
+		a.sendEvent(EventMsg{Type: EventDisconnected})
+		return nil
+	}
+}

@@ -1,0 +1,167 @@
+version: 2
+
+project_name: roster
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: roster
+    main: ./cmd/roster
+    binary: roster
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+  - id: roster-linux-static
+    main: ./cmd/roster
+    binary: roster
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -extldflags "-static"
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    tags:
+      - netgo
+      - osusergo
+      - sqlite_omit_load_extension
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - themes/*
+      - configs/*
+      - docs/*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: meszmate
+    name: roster
+  prerelease: auto
+  mode: replace
+  header: |
+    ## Roster {{ .Tag }}
+
+    Modern XMPP/Jabber client for the terminal.
+
+  footer: |
+    ## Installation
+
+    ### macOS (Apple Silicon)
+    ```bash
+    curl -LO https://github.com/meszmate/roster/releases/download/{{ .Tag }}/roster_Darwin_arm64.tar.gz
+    tar -xzf roster_Darwin_arm64.tar.gz
+    ./roster
+    ```
+
+    ### macOS (Intel)
+    ```bash
+    curl -LO https://github.com/meszmate/roster/releases/download/{{ .Tag }}/roster_Darwin_x86_64.tar.gz
+    tar -xzf roster_Darwin_x86_64.tar.gz
+    ./roster
+    ```
+
+    ### Linux (x86_64)
+    ```bash
+    curl -LO https://github.com/meszmate/roster/releases/download/{{ .Tag }}/roster_Linux_x86_64.tar.gz
+    tar -xzf roster_Linux_x86_64.tar.gz
+    ./roster
+    ```
+
+    ### Linux (ARM64)
+    ```bash
+    curl -LO https://github.com/meszmate/roster/releases/download/{{ .Tag }}/roster_Linux_arm64.tar.gz
+    tar -xzf roster_Linux_arm64.tar.gz
+    ./roster
+    ```
+
+brews:
+  - name: roster
+    repository:
+      owner: meszmate
+      name: homebrew-tap
+    folder: Formula
+    homepage: https://github.com/meszmate/roster
+    description: Modern XMPP/Jabber client for the terminal
+    license: MIT
+    dependencies:
+      - name: sqlite
+    test: |
+      system "#{bin}/roster", "--version"
+    install: |
+      bin.install "roster"
+      prefix.install "themes"
+      prefix.install "configs"
+      prefix.install "docs"
+
+nfpms:
+  - id: roster
+    package_name: roster
+    vendor: meszmate
+    homepage: https://github.com/meszmate/roster
+    maintainer: meszmate
+    description: Modern XMPP/Jabber client for the terminal
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    dependencies:
+      - sqlite
+    contents:
+      - src: themes/*
+        dst: /usr/share/roster/themes
+      - src: configs/*
+        dst: /usr/share/roster/configs
+      - src: docs/*
+        dst: /usr/share/doc/roster

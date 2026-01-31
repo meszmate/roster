@@ -28,5 +28,12 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Build
+/roster
+/build
