@@ -1,0 +1,68 @@
+# Gruvbox Theme - Retro warm terminal aesthetic
+name = "gruvbox"
+description = "Retro groove color scheme with warm, earthy tones"
+
+[colors]
+primary = "#EBDBB2"
+secondary = "#D5C4A1"
+accent = "#FE8019"
+background = "#282828"
+foreground = "#EBDBB2"
+muted = "#928374"
+border = "#3C3836"
+error = "#FB4934"
+warning = "#FABD2F"
+success = "#B8BB26"
+online = "#B8BB26"
+away = "#FABD2F"
+dnd = "#FB4934"
+xa = "#FE8019"
+offline = "#665C54"
+
+[roster]
+header_fg = "#282828"
+header_bg = "#EBDBB2"
+selected_fg = "#282828"
+selected_bg = "#D5C4A1"
+contact_fg = "#EBDBB2"
+group_fg = "#FE8019"
+border_fg = "#3C3836"
+unread_fg = "#FABD2F"
+
+[chat]
+my_message_fg = "#282828"
+my_message_bg = "#83A598"
+their_message_fg = "#EBDBB2"
+their_message_bg = "#3C3836"
+timestamp_fg = "#928374"
+nick_fg = "#8EC07C"
+encrypted_indicator = "#B8BB26"
+unencrypted_indicator = "#FB4934"
+system_message_fg = "#928374"
+typing_indicator_fg = "#FABD2F"
+
+[statusbar]
+fg = "#EBDBB2"
+bg = "#1D2021"
+mode_normal = "#83A598"
+mode_insert = "#B8BB26"
+mode_command = "#FABD2F"
+account_fg = "#EBDBB2"
+status_fg = "#B8BB26"
+
+[commandline]
+prompt_fg = "#FE8019"
+input_fg = "#EBDBB2"
+input_bg = "#282828"
+cursor_fg = "#EBDBB2"
+completion_fg = "#282828"
+completion_bg = "#D5C4A1"
+
+[dialogs]
+border_fg = "#FE8019"
+title_fg = "#EBDBB2"
+content_fg = "#EBDBB2"
+button_fg = "#EBDBB2"
+button_bg = "#3C3836"
+button_active_fg = "#282828"
+button_active_bg = "#EBDBB2"

@@ -1,0 +1,68 @@
+# Nord Theme - Arctic blue, calm aesthetic
+name = "nord"
+description = "Arctic, north-bluish color palette for a calm interface"
+
+[colors]
+primary = "#88C0D0"
+secondary = "#81A1C1"
+accent = "#5E81AC"
+background = "#2E3440"
+foreground = "#ECEFF4"
+muted = "#4C566A"
+border = "#3B4252"
+error = "#BF616A"
+warning = "#EBCB8B"
+success = "#A3BE8C"
+online = "#A3BE8C"
+away = "#EBCB8B"
+dnd = "#BF616A"
+xa = "#D08770"
+offline = "#4C566A"
+
+[roster]
+header_fg = "#2E3440"
+header_bg = "#88C0D0"
+selected_fg = "#2E3440"
+selected_bg = "#81A1C1"
+contact_fg = "#ECEFF4"
+group_fg = "#88C0D0"
+border_fg = "#3B4252"
+unread_fg = "#EBCB8B"
+
+[chat]
+my_message_fg = "#2E3440"
+my_message_bg = "#81A1C1"
+their_message_fg = "#ECEFF4"
+their_message_bg = "#3B4252"
+timestamp_fg = "#4C566A"
+nick_fg = "#88C0D0"
+encrypted_indicator = "#A3BE8C"
+unencrypted_indicator = "#BF616A"
+system_message_fg = "#4C566A"
+typing_indicator_fg = "#EBCB8B"
+
+[statusbar]
+fg = "#ECEFF4"
+bg = "#3B4252"
+mode_normal = "#88C0D0"
+mode_insert = "#A3BE8C"
+mode_command = "#EBCB8B"
+account_fg = "#ECEFF4"
+status_fg = "#A3BE8C"
+
+[commandline]
+prompt_fg = "#88C0D0"
+input_fg = "#ECEFF4"
+input_bg = "#2E3440"
+cursor_fg = "#ECEFF4"
+completion_fg = "#2E3440"
+completion_bg = "#81A1C1"
+
+[dialogs]
+border_fg = "#88C0D0"
+title_fg = "#81A1C1"
+content_fg = "#ECEFF4"
+button_fg = "#ECEFF4"
+button_bg = "#3B4252"
+button_active_fg = "#2E3440"
+button_active_bg = "#88C0D0"
