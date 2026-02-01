@@ -11,12 +11,14 @@ import (
 
 // Contact represents a roster contact
 type Contact struct {
-	JID      string
-	Name     string
-	Groups   []string
-	Status   string // online, away, dnd, xa, offline
-	StatusMsg string
-	Unread   int
+	JID          string
+	Name         string
+	Groups       []string
+	Status       string // online, away, dnd, xa, offline
+	StatusMsg    string
+	Unread       int
+	AccountJID   string // Which account owns this contact
+	StatusHidden bool   // True if we don't share status with this contact
 }
 
 // AccountDisplay represents an account for display in the sidebar
@@ -74,7 +76,6 @@ type Model struct {
 	focusSection       Section // Contacts or Accounts
 	maxVisibleAccounts int     // Maximum visible accounts when not focused
 	maxExpandedAccounts int    // Maximum visible accounts when focused (auto-expand)
-	showAccountTooltip bool    // Show inline account info tooltip
 }
 
 // New creates a new roster model
@@ -127,6 +128,28 @@ func (m Model) UpdatePresence(jid, status string) Model {
 	return m
 }
 
+// UpdatePresenceMessage updates a contact's status message
+func (m Model) UpdatePresenceMessage(jid, statusMsg string) Model {
+	for i, c := range m.contacts {
+		if c.JID == jid {
+			m.contacts[i].StatusMsg = statusMsg
+			break
+		}
+	}
+	return m
+}
+
+// SetContactStatusHidden sets the StatusHidden flag for a contact
+func (m Model) SetContactStatusHidden(jid string, hidden bool) Model {
+	for i, c := range m.contacts {
+		if c.JID == jid {
+			m.contacts[i].StatusHidden = hidden
+			break
+		}
+	}
+	return m
+}
+
 // SetSize sets the component size
 func (m Model) SetSize(width, height int) Model {
 	m.width = width
@@ -167,22 +190,6 @@ func (m Model) ToggleAccountList() Model {
 	return m
 }
 
-// ShowAccountTooltip shows the inline account info tooltip
-func (m Model) ShowAccountTooltip() Model {
-	m.showAccountTooltip = true
-	return m
-}
-
-// HideAccountTooltip hides the inline account info tooltip
-func (m Model) HideAccountTooltip() Model {
-	m.showAccountTooltip = false
-	return m
-}
-
-// IsAccountTooltipVisible returns whether the tooltip is visible
-func (m Model) IsAccountTooltipVisible() bool {
-	return m.showAccountTooltip
-}
 
 // IsAccountListExpanded returns whether the account list is expanded
 func (m Model) IsAccountListExpanded() bool {
@@ -214,7 +221,6 @@ func (m Model) MoveToContacts() Model {
 
 // MoveUp moves the selection up
 func (m Model) MoveUp() Model {
-	m.showAccountTooltip = false // Hide tooltip on navigation
 	if m.focusSection == SectionAccounts {
 		// In accounts section
 		if m.accountSelected > 0 {
@@ -249,7 +255,6 @@ func (m Model) MoveUp() Model {
 
 // MoveDown moves the selection down
 func (m Model) MoveDown() Model {
-	m.showAccountTooltip = false // Hide tooltip on navigation
 	if m.focusSection == SectionContacts {
 		// In contacts section
 		if m.selected < len(m.contacts)-1 {
@@ -471,35 +476,6 @@ func (m Model) getAccountSectionHeight() int {
 		if sessionCount > numVisible && !m.showAccountList {
 			height++ // "↓N more" line
 		}
-	}
-
-	// Add tooltip height only when visible
-	if m.showAccountTooltip && m.focusSection == SectionAccounts {
-		height++ // For the newline before tooltip
-		height += m.getTooltipHeight()
-	}
-
-	return height
-}
-
-// getTooltipHeight returns the height of the tooltip
-func (m Model) getTooltipHeight() int {
-	if m.accountSelected < 0 || m.accountSelected >= len(m.accounts) {
-		return 0
-	}
-
-	acc := m.accounts[m.accountSelected]
-	// Fixed lines: border(1) + status(1) + flags(1) + separator(1) + hint1(1) + hint2(1) = 6
-	height := 6
-
-	if acc.Server != "" {
-		height++
-	}
-	if acc.Resource != "" {
-		height++
-	}
-	if acc.UnreadMsgs > 0 {
-		height++
 	}
 
 	return height
@@ -809,110 +785,6 @@ func (m Model) renderAccountsSection() string {
 		}
 	}
 
-	// Append tooltip only when visible
-	if m.showAccountTooltip && isFocused {
-		b.WriteString("\n")
-		b.WriteString(m.renderAccountTooltip())
-	}
-
-	return b.String()
-}
-
-// GetAccountTooltipContent returns the tooltip content for overlay rendering
-func (m Model) GetAccountTooltipContent() string {
-	if !m.showAccountTooltip || m.focusSection != SectionAccounts {
-		return ""
-	}
-	return m.renderAccountTooltip()
-}
-
-// renderAccountTooltip renders the inline account info tooltip
-func (m Model) renderAccountTooltip() string {
-	if m.accountSelected < 0 || m.accountSelected >= len(m.accounts) {
-		return ""
-	}
-
-	acc := m.accounts[m.accountSelected]
-	var b strings.Builder
-
-	// Top border
-	border := strings.Repeat("─", m.width-4)
-	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" " + border))
-	b.WriteString("\n")
-
-	// Status line with icon
-	var statusIcon string
-	switch acc.Status {
-	case "online":
-		statusIcon = "●"
-	case "connecting":
-		statusIcon = "◐"
-	case "failed":
-		statusIcon = "✘"
-	default:
-		statusIcon = "○"
-	}
-
-	// Status
-	statusLine := fmt.Sprintf(" %s %s", statusIcon, strings.ToUpper(acc.Status[:1])+acc.Status[1:])
-	b.WriteString(m.styles.RosterContact.Width(m.width - 2).Render(statusLine))
-	b.WriteString("\n")
-
-	// Server info
-	if acc.Server != "" {
-		serverInfo := " " + acc.Server
-		if acc.Port > 0 && acc.Port != 5222 {
-			serverInfo += fmt.Sprintf(":%d", acc.Port)
-		}
-		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(serverInfo))
-		b.WriteString("\n")
-	}
-
-	// Resource
-	if acc.Resource != "" {
-		resourceLine := " Resource: " + acc.Resource
-		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(resourceLine))
-		b.WriteString("\n")
-	}
-
-	// Unread
-	if acc.UnreadMsgs > 0 {
-		unreadLine := fmt.Sprintf(" %d unread", acc.UnreadMsgs)
-		if acc.UnreadChats > 0 {
-			unreadLine += fmt.Sprintf(" from %d chats", acc.UnreadChats)
-		}
-		b.WriteString(m.styles.RosterUnread.Width(m.width - 2).Render(unreadLine))
-		b.WriteString("\n")
-	}
-
-	// Flags
-	var flags []string
-	if acc.OMEMO {
-		flags = append(flags, "OMEMO")
-	}
-	if acc.AutoConnect {
-		flags = append(flags, "Auto")
-	}
-	if acc.Session {
-		flags = append(flags, "Session")
-	} else {
-		flags = append(flags, "Saved")
-	}
-	if len(flags) > 0 {
-		flagsLine := " " + strings.Join(flags, " · ")
-		b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(flagsLine))
-		b.WriteString("\n")
-	}
-
-	// Key hints
-	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(" ─────────────────────"))
-	b.WriteString("\n")
-	keyHints := " C=connect  D=disconnect"
-	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("244")).Width(m.width - 2).Render(keyHints))
-	b.WriteString("\n")
-	keyHints2 := " E=edit     X=remove"
-	b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("244")).Width(m.width - 2).Render(keyHints2))
-
 	return b.String()
 }
 
@@ -926,6 +798,9 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 		indicator = "●"
 		indicatorStyle = m.styles.PresenceOnline
 	case "connecting":
+		indicator = "◐"
+		indicatorStyle = m.styles.PresenceAway
+	case "disconnecting":
 		indicator = "◐"
 		indicatorStyle = m.styles.PresenceAway
 	case "failed":
@@ -981,6 +856,8 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 	var statsLine string
 	if acc.Status == "connecting" {
 		statsLine = "  connecting..."
+	} else if acc.Status == "disconnecting" {
+		statsLine = "  disconnecting..."
 	} else if acc.Status == "offline" {
 		statsLine = "  offline"
 		if acc.OMEMO {
@@ -1022,22 +899,29 @@ func (m Model) renderContact(c Contact, selected bool) string {
 	// Presence indicator
 	var presenceStyle lipgloss.Style
 	var indicator string
-	switch c.Status {
-	case "online":
-		presenceStyle = m.styles.PresenceOnline
-		indicator = "●"
-	case "away":
-		presenceStyle = m.styles.PresenceAway
-		indicator = "◐"
-	case "dnd":
-		presenceStyle = m.styles.PresenceDND
-		indicator = "⊘"
-	case "xa":
-		presenceStyle = m.styles.PresenceXA
-		indicator = "◯"
-	default:
-		presenceStyle = m.styles.PresenceOffline
-		indicator = "○"
+
+	// If status is hidden, show "?" indicator in gray
+	if c.StatusHidden {
+		presenceStyle = m.styles.RosterContact.Foreground(lipgloss.Color("242"))
+		indicator = "?"
+	} else {
+		switch c.Status {
+		case "online":
+			presenceStyle = m.styles.PresenceOnline
+			indicator = "●"
+		case "away":
+			presenceStyle = m.styles.PresenceAway
+			indicator = "◐"
+		case "dnd":
+			presenceStyle = m.styles.PresenceDND
+			indicator = "⊘"
+		case "xa":
+			presenceStyle = m.styles.PresenceXA
+			indicator = "◯"
+		default:
+			presenceStyle = m.styles.PresenceOffline
+			indicator = "○"
+		}
 	}
 
 	presence := presenceStyle.Render(indicator)
@@ -1048,19 +932,56 @@ func (m Model) renderContact(c Contact, selected bool) string {
 		name = c.JID
 	}
 
-	// Truncate if needed
-	maxWidth := m.width - 6 // presence + padding + unread
-	if len(name) > maxWidth && maxWidth > 0 {
-		name = name[:maxWidth-1] + "…"
+	// Build status suffix for non-online contacts with status message
+	statusSuffix := ""
+	if c.StatusHidden {
+		// Show "(hidden)" for contacts where status is not shared
+		statusSuffix = " (hidden)"
+	} else if c.StatusMsg != "" && c.Status != "online" {
+		// Show abbreviated status with message: "(away: lunch)"
+		shortStatus := c.Status
+		if c.Status == "offline" {
+			shortStatus = "off"
+		}
+		statusSuffix = fmt.Sprintf(" (%s: %s)", shortStatus, c.StatusMsg)
+	} else if c.StatusMsg != "" && c.Status == "online" {
+		// Online with status message: just show the message
+		statusSuffix = fmt.Sprintf(" (%s)", c.StatusMsg)
 	}
 
 	// Unread indicator
 	unread := ""
 	if c.Unread > 0 {
-		unread = m.styles.RosterUnread.Render(fmt.Sprintf(" (%d)", c.Unread))
+		unread = fmt.Sprintf(" [%d]", c.Unread)
 	}
 
-	// Build line
+	// Calculate available width for name + status
+	// Format: " ● name (status) [N]"
+	// Reserve: 3 (space+indicator+space) + unread length
+	unreadLen := len(unread)
+	maxWidth := m.width - 5 - unreadLen // presence + padding + unread
+	if maxWidth < 5 {
+		maxWidth = 5
+	}
+
+	// Combine name and status suffix, then truncate if needed
+	displayText := name + statusSuffix
+	if len(displayText) > maxWidth {
+		// Truncate, preferring to keep the name
+		if len(name) >= maxWidth {
+			displayText = name[:maxWidth-1] + "…"
+		} else {
+			// Truncate status message
+			remaining := maxWidth - len(name) - 1
+			if remaining > 3 && len(statusSuffix) > 0 {
+				displayText = name + statusSuffix[:remaining] + "…"
+			} else {
+				displayText = name
+			}
+		}
+	}
+
+	// Build line style
 	var style lipgloss.Style
 	if selected {
 		style = m.styles.RosterSelected
@@ -1068,7 +989,13 @@ func (m Model) renderContact(c Contact, selected bool) string {
 		style = m.styles.RosterContact
 	}
 
-	content := fmt.Sprintf(" %s %s%s", presence, name, unread)
+	// Build the content
+	var content string
+	if c.Unread > 0 {
+		content = fmt.Sprintf(" %s %s%s", presence, displayText, m.styles.RosterUnread.Render(unread))
+	} else {
+		content = fmt.Sprintf(" %s %s", presence, displayText)
+	}
 
 	// Pad to width
 	if len(content) < m.width-2 {

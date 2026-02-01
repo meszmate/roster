@@ -153,6 +153,34 @@ func (d *DB) migrate() error {
 			last_read INTEGER,
 			PRIMARY KEY (account, jid)
 		)`,
+
+		// Per-contact presence settings (your custom presence shown to specific contacts)
+		`CREATE TABLE IF NOT EXISTS contact_presence_settings (
+			account TEXT NOT NULL,
+			contact_jid TEXT NOT NULL,
+			my_show TEXT,
+			my_status_msg TEXT,
+			PRIMARY KEY (account, contact_jid)
+		)`,
+
+		// Contact's last known presence (for showing "last seen" when offline)
+		`CREATE TABLE IF NOT EXISTS contact_last_presence (
+			account TEXT NOT NULL,
+			contact_jid TEXT NOT NULL,
+			their_show TEXT,
+			their_status_msg TEXT,
+			last_updated INTEGER,
+			PRIMARY KEY (account, contact_jid)
+		)`,
+
+		// Status sharing settings (who can see your status)
+		// By default, status is NOT shared - user explicitly enables per-contact
+		`CREATE TABLE IF NOT EXISTS status_sharing (
+			account TEXT NOT NULL,
+			contact_jid TEXT NOT NULL,
+			share_enabled INTEGER DEFAULT 0,
+			PRIMARY KEY (account, contact_jid)
+		)`,
 	}
 
 	for _, migration := range migrations {
@@ -767,4 +795,139 @@ func (d *DB) GetDatabaseSize() (int64, error) {
 func (d *DB) Vacuum() error {
 	_, err := d.db.Exec("VACUUM")
 	return err
+}
+
+// Per-contact presence operations
+
+// SaveMyPresenceForContact saves your custom presence for a specific contact
+func (d *DB) SaveMyPresenceForContact(account, contactJID, show, statusMsg string) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO contact_presence_settings (account, contact_jid, my_show, my_status_msg)
+		VALUES (?, ?, ?, ?)
+	`, account, contactJID, show, statusMsg)
+	return err
+}
+
+// GetMyPresenceForContact retrieves your custom presence for a specific contact
+func (d *DB) GetMyPresenceForContact(account, contactJID string) (show, statusMsg string, err error) {
+	var showNull, statusNull sql.NullString
+	err = d.db.QueryRow(`
+		SELECT my_show, my_status_msg FROM contact_presence_settings
+		WHERE account = ? AND contact_jid = ?
+	`, account, contactJID).Scan(&showNull, &statusNull)
+
+	if err == sql.ErrNoRows {
+		return "", "", nil // No custom presence set
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	if showNull.Valid {
+		show = showNull.String
+	}
+	if statusNull.Valid {
+		statusMsg = statusNull.String
+	}
+	return show, statusMsg, nil
+}
+
+// DeleteMyPresenceForContact removes your custom presence for a specific contact
+func (d *DB) DeleteMyPresenceForContact(account, contactJID string) error {
+	_, err := d.db.Exec(`
+		DELETE FROM contact_presence_settings
+		WHERE account = ? AND contact_jid = ?
+	`, account, contactJID)
+	return err
+}
+
+// SaveContactLastPresence saves the contact's last known presence
+func (d *DB) SaveContactLastPresence(account, contactJID, show, statusMsg string) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO contact_last_presence (account, contact_jid, their_show, their_status_msg, last_updated)
+		VALUES (?, ?, ?, ?, ?)
+	`, account, contactJID, show, statusMsg, time.Now().Unix())
+	return err
+}
+
+// GetContactLastPresence retrieves the contact's last known presence
+func (d *DB) GetContactLastPresence(account, contactJID string) (show, statusMsg string, lastUpdated time.Time, err error) {
+	var showNull, statusNull sql.NullString
+	var lastUpdatedUnix int64
+
+	err = d.db.QueryRow(`
+		SELECT their_show, their_status_msg, last_updated FROM contact_last_presence
+		WHERE account = ? AND contact_jid = ?
+	`, account, contactJID).Scan(&showNull, &statusNull, &lastUpdatedUnix)
+
+	if err == sql.ErrNoRows {
+		return "", "", time.Time{}, nil // No presence recorded
+	}
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+
+	if showNull.Valid {
+		show = showNull.String
+	}
+	if statusNull.Valid {
+		statusMsg = statusNull.String
+	}
+	lastUpdated = time.Unix(lastUpdatedUnix, 0)
+	return show, statusMsg, lastUpdated, nil
+}
+
+// Status sharing operations
+
+// SetStatusSharing enables or disables status sharing for a contact
+func (d *DB) SetStatusSharing(account, contactJID string, enabled bool) error {
+	val := 0
+	if enabled {
+		val = 1
+	}
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO status_sharing (account, contact_jid, share_enabled)
+		VALUES (?, ?, ?)
+	`, account, contactJID, val)
+	return err
+}
+
+// GetStatusSharing returns whether status sharing is enabled for a contact
+func (d *DB) GetStatusSharing(account, contactJID string) (bool, error) {
+	var enabled int
+	err := d.db.QueryRow(`
+		SELECT share_enabled FROM status_sharing
+		WHERE account = ? AND contact_jid = ?
+	`, account, contactJID).Scan(&enabled)
+
+	if err == sql.ErrNoRows {
+		return false, nil // Default: not shared
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return enabled == 1, nil
+}
+
+// GetContactsWithStatusSharing returns all contacts who have status sharing enabled
+func (d *DB) GetContactsWithStatusSharing(account string) ([]string, error) {
+	rows, err := d.db.Query(`
+		SELECT contact_jid FROM status_sharing
+		WHERE account = ? AND share_enabled = 1
+	`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contacts []string
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err != nil {
+			return nil, err
+		}
+		contacts = append(contacts, jid)
+	}
+	return contacts, nil
 }

@@ -3,6 +3,7 @@ package dialogs
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -19,6 +20,7 @@ const (
 	DialogInputType
 	DialogAddContact
 	DialogJoinRoom
+	DialogCreateRoom
 	DialogContactInfo
 	DialogFingerprint
 	DialogSubscription
@@ -30,7 +32,23 @@ const (
 	DialogSettings
 	DialogContextHelp
 	DialogAccountRemove
+	DialogLoading
 )
+
+// OperationType identifies which async operation is in progress
+type OperationType string
+
+const (
+	OpNone         OperationType = ""
+	OpAddContact   OperationType = "add_contact"
+	OpJoinRoom     OperationType = "join_room"
+	OpCreateRoom   OperationType = "create_room"
+	OpConnect      OperationType = "connect"
+	OpDisconnect   OperationType = "disconnect"
+)
+
+// Spinner frames for loading animation
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 // DialogResult is sent when a dialog is closed
 type DialogResult struct {
@@ -39,19 +57,34 @@ type DialogResult struct {
 	Values    map[string]string
 }
 
+// SpinnerTickMsg is sent to animate the loading spinner
+type SpinnerTickMsg struct{}
+
+// CancelOperationMsg is sent when user cancels a loading operation
+type CancelOperationMsg struct {
+	Operation OperationType
+}
+
 // Model represents the dialog component
 type Model struct {
-	dialogType  DialogType
-	title       string
-	message     string
-	inputs      []DialogInput
-	activeInput int
-	buttons     []string
-	activeBtn   int
-	width       int
-	height      int
-	styles      *theme.Styles
-	data        map[string]string
+	dialogType     DialogType
+	title          string
+	message        string
+	inputs         []DialogInput
+	checkboxes     []DialogCheckbox
+	activeInput    int
+	activeCheckbox int
+	inCheckboxes   bool // true if focus is in checkboxes section
+	buttons        []string
+	activeBtn      int
+	width          int
+	height         int
+	styles         *theme.Styles
+	data           map[string]string
+
+	// Loading dialog state
+	spinnerFrame  int
+	operationType OperationType
 }
 
 // DialogInput represents an input field in a dialog
@@ -61,6 +94,13 @@ type DialogInput struct {
 	Value    string
 	Cursor   int
 	Password bool
+}
+
+// DialogCheckbox represents a checkbox in a dialog
+type DialogCheckbox struct {
+	Label   string
+	Key     string
+	Checked bool
 }
 
 // New creates a new dialog model
@@ -115,6 +155,8 @@ func (m Model) ShowAddContact() Model {
 		{Label: "Name", Key: "name", Value: ""},
 		{Label: "Group", Key: "group", Value: ""},
 	}
+	m.checkboxes = nil
+	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Add", "Cancel"}
 	m.activeBtn = 0
@@ -131,6 +173,8 @@ func (m Model) ShowJoinRoom() Model {
 		{Label: "Nickname", Key: "nick", Value: ""},
 		{Label: "Password", Key: "password", Value: "", Password: true},
 	}
+	m.checkboxes = nil
+	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Join", "Cancel"}
 	m.activeBtn = 0
@@ -208,8 +252,13 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	sb.WriteString("  gx        Remove contact\n")
 	sb.WriteString("  gR        Rename contact\n")
 	sb.WriteString("  gj        Join room\n")
+	sb.WriteString("  gC        Create room\n")
 	sb.WriteString("  gs/S      Settings\n")
 	sb.WriteString("  gw        Save windows\n")
+	sb.WriteString("\nContact Details:\n")
+	sb.WriteString("  s         Toggle status sharing\n")
+	sb.WriteString("  v         Verify fingerprint\n")
+	sb.WriteString("  Space     Bind account to window\n")
 	sb.WriteString("\nWindows:\n")
 	sb.WriteString("  Alt+1-0   Windows 1-10\n")
 	sb.WriteString("  Tab       Next window\n")
@@ -250,6 +299,8 @@ func (m Model) ShowAccountAdd() Model {
 		{Label: "Port (default: 5222)", Key: "port", Value: ""},
 		{Label: "Resource (default: roster)", Key: "resource", Value: ""},
 	}
+	m.checkboxes = nil
+	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Add", "Cancel"}
 	m.activeBtn = 0
@@ -272,6 +323,8 @@ func (m Model) ShowAccountEdit(jid, server string, port int, resource string) Mo
 		{Label: "Port", Key: "port", Value: portStr},
 		{Label: "Resource", Key: "resource", Value: resource},
 	}
+	m.checkboxes = nil
+	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Save", "Cancel"}
 	m.activeBtn = 0
@@ -333,6 +386,8 @@ func (m Model) ShowPassword(jid string) Model {
 	m.inputs = []DialogInput{
 		{Label: "Password", Key: "password", Value: "", Password: true},
 	}
+	m.checkboxes = nil
+	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Connect", "Cancel"}
 	m.activeBtn = 0
@@ -406,7 +461,33 @@ func (m Model) ShowAccountRemoveConfirm(jid string, isSession bool) Model {
 	m.buttons = []string{"Remove", "Cancel"}
 	m.activeBtn = 1 // Default to Cancel for safety
 	m.inputs = nil
+	m.checkboxes = nil
 	m.data["jid"] = jid
+	return m
+}
+
+// ShowCreateRoom shows the create room dialog
+func (m Model) ShowCreateRoom() Model {
+	m.dialogType = DialogCreateRoom
+	m.title = "Create Room"
+	m.message = ""
+	m.inputs = []DialogInput{
+		{Label: "Room JID (room@conference.server)", Key: "room_jid", Value: ""},
+		{Label: "Nickname", Key: "nick", Value: ""},
+		{Label: "Room Name (optional)", Key: "name", Value: ""},
+		{Label: "Description (optional)", Key: "desc", Value: ""},
+		{Label: "Password (optional)", Key: "password", Value: "", Password: true},
+	}
+	m.checkboxes = []DialogCheckbox{
+		{Label: "Use defaults (instant room)", Key: "defaults", Checked: true},
+		{Label: "Members only", Key: "members_only", Checked: false},
+		{Label: "Persistent", Key: "persistent", Checked: false},
+	}
+	m.activeInput = 0
+	m.activeCheckbox = 0
+	m.inCheckboxes = false
+	m.buttons = []string{"Create", "Cancel"}
+	m.activeBtn = 0
 	return m
 }
 
@@ -414,7 +495,49 @@ func (m Model) ShowAccountRemoveConfirm(jid string, isSession bool) Model {
 func (m Model) Hide() Model {
 	m.dialogType = DialogNone
 	m.inputs = nil
+	m.checkboxes = nil
+	m.inCheckboxes = false
+	m.operationType = OpNone
+	m.spinnerFrame = 0
 	m.data = make(map[string]string)
+	return m
+}
+
+// ShowLoading shows a loading dialog with spinner and cancel button
+func (m Model) ShowLoading(message string, operation OperationType) Model {
+	m.dialogType = DialogLoading
+	m.title = "Please Wait"
+	m.message = message
+	m.inputs = nil
+	m.checkboxes = nil
+	m.inCheckboxes = false
+	m.buttons = []string{"Cancel"}
+	m.activeBtn = 0
+	m.spinnerFrame = 0
+	m.operationType = operation
+	return m
+}
+
+// IsLoading returns true if a loading dialog is active
+func (m Model) IsLoading() bool {
+	return m.dialogType == DialogLoading
+}
+
+// GetOperationType returns the current operation type
+func (m Model) GetOperationType() OperationType {
+	return m.operationType
+}
+
+// SpinnerTick returns a command that sends a spinner tick after a delay
+func SpinnerTick() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return SpinnerTickMsg{}
+	})
+}
+
+// AdvanceSpinner advances the spinner frame
+func (m Model) AdvanceSpinner() Model {
+	m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
 	return m
 }
 
@@ -424,8 +547,25 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle spinner tick for loading dialog
+	if _, ok := msg.(SpinnerTickMsg); ok && m.dialogType == DialogLoading {
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+		return m, SpinnerTick()
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Special handling for loading dialog - only allow cancel
+		if m.dialogType == DialogLoading {
+			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyEnter {
+				op := m.operationType
+				m = m.Hide()
+				return m, func() tea.Msg { return CancelOperationMsg{Operation: op} }
+			}
+			// Ignore other keys in loading dialog
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyEsc:
 			// Cancel dialog
@@ -437,20 +577,53 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, func() tea.Msg { return result }
 
 		case tea.KeyTab:
-			// Cycle through inputs/buttons
-			if len(m.inputs) > 0 {
+			// Cycle through inputs, then checkboxes
+			if m.inCheckboxes {
+				m.activeCheckbox++
+				if m.activeCheckbox >= len(m.checkboxes) {
+					m.activeCheckbox = 0
+					m.inCheckboxes = false
+					m.activeInput = 0
+				}
+			} else if len(m.inputs) > 0 {
 				m.activeInput++
 				if m.activeInput >= len(m.inputs) {
-					m.activeInput = 0
+					if len(m.checkboxes) > 0 {
+						m.inCheckboxes = true
+						m.activeCheckbox = 0
+					} else {
+						m.activeInput = 0
+					}
+				}
+			} else if len(m.checkboxes) > 0 {
+				m.inCheckboxes = true
+				m.activeCheckbox++
+				if m.activeCheckbox >= len(m.checkboxes) {
+					m.activeCheckbox = 0
 				}
 			}
 
 		case tea.KeyShiftTab:
 			// Cycle backwards
-			if len(m.inputs) > 0 {
+			if m.inCheckboxes {
+				m.activeCheckbox--
+				if m.activeCheckbox < 0 {
+					if len(m.inputs) > 0 {
+						m.inCheckboxes = false
+						m.activeInput = len(m.inputs) - 1
+					} else {
+						m.activeCheckbox = len(m.checkboxes) - 1
+					}
+				}
+			} else if len(m.inputs) > 0 {
 				m.activeInput--
 				if m.activeInput < 0 {
-					m.activeInput = len(m.inputs) - 1
+					if len(m.checkboxes) > 0 {
+						m.inCheckboxes = true
+						m.activeCheckbox = len(m.checkboxes) - 1
+					} else {
+						m.activeInput = len(m.inputs) - 1
+					}
 				}
 			}
 
@@ -477,10 +650,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case tea.KeyEnter:
+			// If in checkboxes, toggle the checkbox instead of confirming
+			if m.inCheckboxes && m.activeCheckbox < len(m.checkboxes) {
+				m.checkboxes[m.activeCheckbox].Checked = !m.checkboxes[m.activeCheckbox].Checked
+				return m, nil
+			}
+
 			// Confirm action
 			values := make(map[string]string)
 			for _, input := range m.inputs {
 				values[input.Key] = input.Value
+			}
+			for _, cb := range m.checkboxes {
+				if cb.Checked {
+					values[cb.Key] = "true"
+				} else {
+					values[cb.Key] = "false"
+				}
 			}
 			for k, v := range m.data {
 				values[k] = v
@@ -495,6 +681,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m = m.Hide()
 			return m, func() tea.Msg { return result }
 
+		case tea.KeySpace:
+			// Toggle checkbox if in checkbox mode
+			if m.inCheckboxes && m.activeCheckbox < len(m.checkboxes) {
+				m.checkboxes[m.activeCheckbox].Checked = !m.checkboxes[m.activeCheckbox].Checked
+				return m, nil
+			}
+			// Otherwise, add space to input
+			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) && !m.inCheckboxes {
+				input := &m.inputs[m.activeInput]
+				input.Value = input.Value[:input.Cursor] + " " + input.Value[input.Cursor:]
+				input.Cursor++
+			}
+
 		case tea.KeyBackspace:
 			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
 				input := &m.inputs[m.activeInput]
@@ -505,17 +704,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case tea.KeyRunes:
-			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
+			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) && !m.inCheckboxes {
 				input := &m.inputs[m.activeInput]
 				input.Value = input.Value[:input.Cursor] + string(msg.Runes) + input.Value[input.Cursor:]
 				input.Cursor += len(msg.Runes)
-			}
-
-		case tea.KeySpace:
-			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
-				input := &m.inputs[m.activeInput]
-				input.Value = input.Value[:input.Cursor] + " " + input.Value[input.Cursor:]
-				input.Cursor++
 			}
 		}
 	}
@@ -530,6 +722,30 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
+
+	// Special rendering for loading dialog
+	if m.dialogType == DialogLoading {
+		// Title
+		title := m.styles.DialogTitle.Render(m.title)
+		b.WriteString(title)
+		b.WriteString("\n\n")
+
+		// Spinner and message
+		spinner := spinnerFrames[m.spinnerFrame]
+		b.WriteString(m.styles.DialogContent.Render(spinner + " " + m.message))
+		b.WriteString("\n\n")
+
+		// Cancel button
+		cancelBtn := m.styles.DialogButtonActive.Render("Cancel")
+		b.WriteString(cancelBtn)
+		b.WriteString("\n")
+		b.WriteString(m.styles.DialogContent.Render("(Press Esc or Enter to cancel)"))
+
+		return m.styles.DialogBorder.
+			Width(50).
+			Padding(1, 2).
+			Render(b.String())
+	}
 
 	// Title
 	title := m.styles.DialogTitle.Render(m.title)
@@ -553,7 +769,7 @@ func (m Model) View() string {
 		}
 
 		var rendered string
-		if i == m.activeInput {
+		if i == m.activeInput && !m.inCheckboxes {
 			// Show cursor
 			beforeCursor := value
 			cursorChar := " "
@@ -574,6 +790,28 @@ func (m Model) View() string {
 	}
 
 	if len(m.inputs) > 0 {
+		b.WriteString("\n")
+	}
+
+	// Checkboxes
+	for i, cb := range m.checkboxes {
+		checkMark := "[ ]"
+		if cb.Checked {
+			checkMark = "[x]"
+		}
+
+		var rendered string
+		if i == m.activeCheckbox && m.inCheckboxes {
+			rendered = m.styles.InputFocused.Render(checkMark + " " + cb.Label)
+		} else {
+			rendered = m.styles.InputNormal.Render(checkMark + " " + cb.Label)
+		}
+
+		b.WriteString(rendered)
+		b.WriteString("\n")
+	}
+
+	if len(m.checkboxes) > 0 {
 		b.WriteString("\n")
 	}
 

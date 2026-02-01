@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/meszmate/roster/internal/config"
 	"github.com/meszmate/roster/internal/ui/components/chat"
+	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
 	"github.com/meszmate/roster/internal/xmpp"
 )
@@ -94,6 +95,42 @@ type ConnectingMsg struct {
 	JID string
 }
 
+// AddContactResultMsg is sent when add contact operation completes
+type AddContactResultMsg struct {
+	Success bool
+	JID     string
+	Name    string
+	Error   string
+}
+
+// DisconnectResultMsg is sent when a disconnect operation completes
+type DisconnectResultMsg struct {
+	Success bool
+	JID     string
+	Error   string
+}
+
+// JoinRoomResultMsg is sent when join room operation completes
+type JoinRoomResultMsg struct {
+	Success  bool
+	RoomJID  string
+	Nick     string
+	Error    string
+}
+
+// CreateRoomResultMsg is sent when create room operation completes
+type CreateRoomResultMsg struct {
+	Success bool
+	RoomJID string
+	Nick    string
+	Error   string
+}
+
+// OperationTimeoutMsg is sent when an async operation times out
+type OperationTimeoutMsg struct {
+	Operation dialogs.OperationType
+}
+
 // App represents the main application
 type App struct {
 	cfg       *config.Config
@@ -103,8 +140,9 @@ type App struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	// XMPP client
-	xmppClient *xmpp.Client
+	// Multi-client XMPP support
+	clients    map[string]*xmpp.Client // accountJID -> client
+	xmppClient *xmpp.Client            // Current/default client for backward compat
 
 	// State
 	mu             sync.RWMutex
@@ -118,6 +156,13 @@ type App struct {
 	// Multi-account state
 	accountStatuses map[string]string // JID -> status (online, connecting, failed, offline)
 	accountUnreads  map[string]int    // JID -> unread count
+
+	// Per-account contact unread tracking: accountJID -> contactJID -> unread count
+	contactUnreads map[string]map[string]int
+
+	// Operation tracking for cancellation
+	pendingOps   map[dialogs.OperationType]context.CancelFunc
+	pendingOpsMu sync.Mutex
 }
 
 // New creates a new App instance
@@ -139,6 +184,9 @@ func New(cfg *config.Config) (*App, error) {
 		chatHistory:     make(map[string][]chat.Message),
 		accountStatuses: make(map[string]string),
 		accountUnreads:  make(map[string]int),
+		clients:         make(map[string]*xmpp.Client),
+		contactUnreads:  make(map[string]map[string]int),
+		pendingOps:      make(map[dialogs.OperationType]context.CancelFunc),
 	}
 
 	return app, nil
@@ -182,10 +230,15 @@ func (a *App) autoConnect() tea.Cmd {
 		}
 
 		for _, account := range a.accounts.Accounts {
-			if account.AutoConnect {
-				// Connection will be handled by XMPP client
+			if account.AutoConnect && account.Password != "" {
+				// Set current account and trigger connection
 				a.currentAccount = account.JID
-				break
+				a.mu.Lock()
+				a.status = "connecting"
+				a.accountStatuses[account.JID] = "connecting"
+				a.mu.Unlock()
+				// Return ConnectingMsg to trigger actual connection
+				return ConnectingMsg{JID: account.JID}
 			}
 		}
 
@@ -242,11 +295,60 @@ func (a *App) SetStatus(status, statusMsg string) {
 	a.mu.Unlock()
 }
 
+// mapStatusToShow converts a status string to XMPP show value
+func mapStatusToShow(status string) string {
+	switch status {
+	case "online":
+		return "" // Empty show means online/available
+	case "away":
+		return "away"
+	case "dnd":
+		return "dnd"
+	case "xa":
+		return "xa"
+	case "offline":
+		return "" // Will send unavailable presence
+	default:
+		return ""
+	}
+}
+
+// SetStatusAndSend sets the status and sends presence to the server
+func (a *App) SetStatusAndSend(status, statusMsg string) error {
+	a.SetStatus(status, statusMsg)
+
+	a.mu.RLock()
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return nil // Not connected, just set local status
+	}
+
+	show := mapStatusToShow(status)
+	return client.SendPresence(show, statusMsg)
+}
+
 // GetContacts returns the roster contacts
 func (a *App) GetContacts() []roster.Contact {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.contacts
+}
+
+// GetContactsWithStatusInfo returns contacts enriched with status sharing info
+func (a *App) GetContactsWithStatusInfo() []roster.Contact {
+	a.mu.RLock()
+	contacts := make([]roster.Contact, len(a.contacts))
+	copy(contacts, a.contacts)
+	a.mu.RUnlock()
+
+	// Enrich each contact with status sharing info
+	for i := range contacts {
+		contacts[i].StatusHidden = !a.IsStatusSharingEnabled(contacts[i].JID)
+	}
+
+	return contacts
 }
 
 // SetContacts sets the roster contacts
@@ -425,7 +527,10 @@ func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 			} else if cmd != "status" && len(args) > 0 {
 				msg = args[0]
 			}
-			a.SetStatus(status, msg)
+			if err := a.SetStatusAndSend(status, msg); err != nil {
+				// Status set locally but failed to send
+				_ = err
+			}
 			return nil
 
 		// Messaging
@@ -705,14 +810,16 @@ func (a *App) GetAllAccountsDisplay() []AccountDisplayInfo {
 			status = "offline"
 		}
 
-		// Calculate unread messages and chats
+		// Calculate unread messages and chats per account
 		unreadMsgs := a.accountUnreads[acc.JID]
 		unreadChats := 0
 
-		// Count contacts with unread messages
-		for _, contact := range a.contacts {
-			if contact.Unread > 0 {
-				unreadChats++
+		// Count contacts with unread messages for this specific account
+		if contactUnreads, exists := a.contactUnreads[acc.JID]; exists {
+			for _, unread := range contactUnreads {
+				if unread > 0 {
+					unreadChats++
+				}
 			}
 		}
 
@@ -758,6 +865,53 @@ func (a *App) ClearAccountUnread(jid string) {
 	a.mu.Lock()
 	a.accountUnreads[jid] = 0
 	a.mu.Unlock()
+}
+
+// GetUnreadChatsForAccount returns the number of contacts with unread messages for a specific account
+func (a *App) GetUnreadChatsForAccount(accountJID string) int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if contactUnreads, exists := a.contactUnreads[accountJID]; exists {
+		count := 0
+		for _, unread := range contactUnreads {
+			if unread > 0 {
+				count++
+			}
+		}
+		return count
+	}
+	return 0
+}
+
+// IncrementContactUnread increments unread count for a specific contact under an account
+func (a *App) IncrementContactUnread(accountJID, contactJID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.contactUnreads[accountJID] == nil {
+		a.contactUnreads[accountJID] = make(map[string]int)
+	}
+	a.contactUnreads[accountJID][contactJID]++
+	// Also increment total account unreads
+	a.accountUnreads[accountJID]++
+}
+
+// ClearContactUnread clears unread count for a specific contact
+func (a *App) ClearContactUnread(accountJID, contactJID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if contactUnreads, exists := a.contactUnreads[accountJID]; exists {
+		if oldCount, ok := contactUnreads[contactJID]; ok && oldCount > 0 {
+			// Decrease total account unreads by the amount we're clearing
+			a.accountUnreads[accountJID] -= oldCount
+			if a.accountUnreads[accountJID] < 0 {
+				a.accountUnreads[accountJID] = 0
+			}
+		}
+		delete(contactUnreads, contactJID)
+	}
 }
 
 // SwitchActiveAccount switches to a different account
@@ -818,16 +972,24 @@ func (a *App) LoadWindowState() ([]WindowState, error) {
 // doConnect performs the actual XMPP connection
 func (a *App) doConnect(jidStr, password, server string, port int, isSession bool) tea.Cmd {
 	return func() tea.Msg {
+		// Check if already connected
+		a.mu.RLock()
+		if client, exists := a.clients[jidStr]; exists && client.IsConnected() {
+			a.mu.RUnlock()
+			return ConnectResultMsg{
+				Success: true,
+				JID:     jidStr,
+			}
+		}
+		a.mu.RUnlock()
+
 		// Set connecting status
 		a.mu.Lock()
 		a.status = "connecting"
 		a.currentAccount = jidStr
 		a.accountStatuses[jidStr] = "connecting" // Update account-specific status
-		// Disconnect existing client if any
-		if a.xmppClient != nil {
-			_ = a.xmppClient.Disconnect()
-			a.xmppClient = nil
-		}
+		// NOTE: We no longer disconnect existing clients - true multi-account support
+		// Each account maintains its own connection in the clients map
 		a.mu.Unlock()
 
 		// Notify UI of status change
@@ -864,6 +1026,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.connected = false
 			a.status = "offline"
 			a.accountStatuses[jidStr] = "offline"
+			delete(a.clients, jidStr) // Remove from multi-client map
 			a.mu.Unlock()
 			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
 		})
@@ -881,7 +1044,10 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 				Encrypted: msg.Encrypted,
 				Outgoing:  false,
 			}
-			a.AddChatMessage(msg.From.Bare().String(), chatMsg)
+			contactJID := msg.From.Bare().String()
+			a.AddChatMessage(contactJID, chatMsg)
+			// Track per-account unreads for multi-account support
+			a.IncrementContactUnread(jidStr, contactJID)
 		})
 
 		// Attempt to connect
@@ -901,6 +1067,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		// Connection successful
 		a.mu.Lock()
 		a.xmppClient = client
+		a.clients[jidStr] = client // Store in multi-client map
 		a.connected = true
 		a.currentAccount = jidStr
 		a.status = "online"
@@ -950,28 +1117,55 @@ func (a *App) DoConnect(jidStr string) tea.Cmd {
 	return a.doConnect(acc.JID, acc.Password, acc.Server, acc.Port, acc.Session)
 }
 
-// Disconnect disconnects from the XMPP server
+// Disconnect disconnects from the XMPP server (legacy - disconnects current account)
 func (a *App) Disconnect() tea.Cmd {
+	a.mu.RLock()
+	currentAcc := a.currentAccount
+	a.mu.RUnlock()
+	return a.DoDisconnect(currentAcc)
+}
+
+// DoDisconnect disconnects a specific account by JID
+func (a *App) DoDisconnect(jidStr string) tea.Cmd {
 	return func() tea.Msg {
-		a.mu.Lock()
-		currentAcc := a.currentAccount
-		if a.xmppClient != nil {
-			_ = a.xmppClient.Disconnect()
-			a.xmppClient = nil
+		if jidStr == "" {
+			return DisconnectResultMsg{
+				Success: false,
+				JID:     jidStr,
+				Error:   "No account specified",
+			}
 		}
-		a.connected = false
-		a.status = "offline"
-		if currentAcc != "" {
-			a.accountStatuses[currentAcc] = "offline"
+
+		// Get client reference while holding lock
+		a.mu.Lock()
+		client, exists := a.clients[jidStr]
+		if exists {
+			delete(a.clients, jidStr)
+		}
+		// Update status
+		a.accountStatuses[jidStr] = "offline"
+		// If this was the current account, update global status
+		if a.currentAccount == jidStr {
+			a.xmppClient = nil
+			a.connected = false
+			a.status = "offline"
 		}
 		a.mu.Unlock()
 
+		// Call Disconnect without holding the lock
+		if client != nil {
+			_ = client.Disconnect()
+		}
+
 		a.sendEvent(EventMsg{Type: EventDisconnected})
-		return nil
+		return DisconnectResultMsg{
+			Success: true,
+			JID:     jidStr,
+		}
 	}
 }
 
-// AddContact adds a contact to the roster and sends a subscription request
+// AddContact adds a contact to the roster and sends a subscription request (sync version)
 func (a *App) AddContact(contactJID, name, group string) error {
 	a.mu.RLock()
 	client := a.xmppClient
@@ -998,4 +1192,363 @@ func (a *App) AddContact(contactJID, name, group string) error {
 	}
 
 	return nil
+}
+
+// DoAddContact adds a contact asynchronously and returns a tea.Cmd
+func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
+	// Register the operation
+	a.RegisterOperation(dialogs.OpAddContact, func() {})
+
+	return func() tea.Msg {
+		// Mark operation as complete when done (before returning)
+		defer a.CompleteOperation(dialogs.OpAddContact)
+
+		err := a.AddContact(contactJID, name, group)
+		if err != nil {
+			return AddContactResultMsg{
+				Success: false,
+				JID:     contactJID,
+				Name:    name,
+				Error:   err.Error(),
+			}
+		}
+		return AddContactResultMsg{
+			Success: true,
+			JID:     contactJID,
+			Name:    name,
+		}
+	}
+}
+
+// RequestRosterRefresh requests a fresh roster from the XMPP server
+func (a *App) RequestRosterRefresh() tea.Cmd {
+	return func() tea.Msg {
+		a.mu.RLock()
+		client := a.xmppClient
+		a.mu.RUnlock()
+
+		if client == nil || !client.IsConnected() {
+			return nil
+		}
+
+		// Request roster from server (this will trigger EventRosterUpdate when complete)
+		if err := client.RequestRoster(); err != nil {
+			return nil
+		}
+
+		return nil
+	}
+}
+
+// CancelOperation cancels a pending async operation
+func (a *App) CancelOperation(op dialogs.OperationType) {
+	a.pendingOpsMu.Lock()
+	defer a.pendingOpsMu.Unlock()
+
+	if cancel, exists := a.pendingOps[op]; exists {
+		cancel()
+		delete(a.pendingOps, op)
+	}
+}
+
+// OperationTimeout returns a command that sends a timeout message after the specified duration
+func (a *App) OperationTimeout(op dialogs.OperationType, seconds int) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(time.Duration(seconds) * time.Second)
+
+		// Check if the operation is still pending
+		a.pendingOpsMu.Lock()
+		_, stillPending := a.pendingOps[op]
+		a.pendingOpsMu.Unlock()
+
+		if stillPending {
+			return OperationTimeoutMsg{Operation: op}
+		}
+		return nil
+	}
+}
+
+// RegisterOperation registers a pending operation with a cancel function
+func (a *App) RegisterOperation(op dialogs.OperationType, cancel context.CancelFunc) {
+	a.pendingOpsMu.Lock()
+	defer a.pendingOpsMu.Unlock()
+	a.pendingOps[op] = cancel
+}
+
+// CompleteOperation marks an operation as complete (removes from pending)
+func (a *App) CompleteOperation(op dialogs.OperationType) {
+	a.pendingOpsMu.Lock()
+	defer a.pendingOpsMu.Unlock()
+	delete(a.pendingOps, op)
+}
+
+// DoJoinRoom joins a room asynchronously and returns a tea.Cmd
+func (a *App) DoJoinRoom(roomJID, nick, password string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.JoinRoom(roomJID, nick, password)
+		if err != nil {
+			return JoinRoomResultMsg{
+				Success: false,
+				RoomJID: roomJID,
+				Nick:    nick,
+				Error:   err.Error(),
+			}
+		}
+		return JoinRoomResultMsg{
+			Success: true,
+			RoomJID: roomJID,
+			Nick:    nick,
+		}
+	}
+}
+
+// DoCreateRoom creates a room asynchronously and returns a tea.Cmd
+func (a *App) DoCreateRoom(roomJID, nick, password string, useDefaults, membersOnly, persistent bool) tea.Cmd {
+	return func() tea.Msg {
+		err := a.CreateRoom(roomJID, nick, password, useDefaults, membersOnly, persistent)
+		if err != nil {
+			return CreateRoomResultMsg{
+				Success: false,
+				RoomJID: roomJID,
+				Nick:    nick,
+				Error:   err.Error(),
+			}
+		}
+		return CreateRoomResultMsg{
+			Success: true,
+			RoomJID: roomJID,
+			Nick:    nick,
+		}
+	}
+}
+
+// Per-contact presence management
+
+// ContactPresence holds custom presence settings for a contact
+type ContactPresence struct {
+	Show      string // away, dnd, xa, etc.
+	StatusMsg string
+}
+
+// SetPresenceForContact sets your custom presence for a specific contact
+// If show is empty, the custom presence is removed and default is used
+func (a *App) SetPresenceForContact(contactJID, show, statusMsg string) error {
+	// TODO: Save to storage when storage is integrated
+	// For now, this is a placeholder that can be implemented with storage
+	_ = contactJID
+	_ = show
+	_ = statusMsg
+	return nil
+}
+
+// GetPresenceForContact gets your custom presence for a specific contact
+// Returns empty strings if no custom presence is set (use default)
+func (a *App) GetPresenceForContact(contactJID string) (show, statusMsg string) {
+	// TODO: Load from storage when storage is integrated
+	// For now, returns empty (no custom presence)
+	_ = contactJID
+	return "", ""
+}
+
+// SaveContactLastPresence saves the contact's last known presence when they go offline
+func (a *App) SaveContactLastPresence(contactJID, show, statusMsg string) error {
+	// TODO: Save to storage when storage is integrated
+	_ = contactJID
+	_ = show
+	_ = statusMsg
+	return nil
+}
+
+// GetContactLastPresence gets the contact's last known presence
+func (a *App) GetContactLastPresence(contactJID string) (show, statusMsg string, lastSeen time.Time) {
+	// TODO: Load from storage when storage is integrated
+	_ = contactJID
+	return "", "", time.Time{}
+}
+
+// ToggleAccountAutoConnect toggles the auto-connect setting for an account
+func (a *App) ToggleAccountAutoConnect(jid string) bool {
+	for i := range a.accounts.Accounts {
+		if a.accounts.Accounts[i].JID == jid && !a.accounts.Accounts[i].Session {
+			a.accounts.Accounts[i].AutoConnect = !a.accounts.Accounts[i].AutoConnect
+			_ = config.SaveAccounts(a.accounts)
+			return a.accounts.Accounts[i].AutoConnect
+		}
+	}
+	return false
+}
+
+// GetClientForAccount returns the XMPP client for a specific account
+func (a *App) GetClientForAccount(accountJID string) *xmpp.Client {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.clients[accountJID]
+}
+
+// GetConnectedClient returns a connected client for the account (or nil)
+func (a *App) getConnectedClient(accountJID string) *xmpp.Client {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if client, ok := a.clients[accountJID]; ok && client.IsConnected() {
+		return client
+	}
+	return nil
+}
+
+// IsAccountConnected checks if a specific account is connected
+func (a *App) IsAccountConnected(accountJID string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if client, ok := a.clients[accountJID]; ok {
+		return client.IsConnected()
+	}
+	return false
+}
+
+// GetContactsForAccount returns contacts filtered by account
+func (a *App) GetContactsForAccount(accountJID string) []roster.Contact {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	if accountJID == "" {
+		return a.contacts // Return all if no account specified
+	}
+
+	var filtered []roster.Contact
+	for _, c := range a.contacts {
+		if c.AccountJID == accountJID {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
+
+// SendPresenceForAccount sends presence for a specific account
+func (a *App) SendPresenceForAccount(accountJID, show, status string) error {
+	client := a.getConnectedClient(accountJID)
+	if client == nil {
+		return fmt.Errorf("account not connected")
+	}
+	return client.SendPresence(show, status)
+}
+
+// JoinRoom joins an existing MUC room
+func (a *App) JoinRoom(roomJID, nick, password string) error {
+	a.mu.RLock()
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	return client.JoinRoom(roomJID, nick, password)
+}
+
+// CreateRoom creates a new MUC room
+func (a *App) CreateRoom(roomJID, nick, password string, useDefaults, membersOnly, persistent bool) error {
+	a.mu.RLock()
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	config := &xmpp.RoomConfig{
+		UseDefaults: useDefaults,
+		Password:    password,
+		MembersOnly: membersOnly,
+		Persistent:  persistent,
+	}
+
+	return client.CreateRoom(roomJID, nick, config)
+}
+
+// LeaveRoom leaves a MUC room
+func (a *App) LeaveRoom(roomJID, nick string) error {
+	a.mu.RLock()
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	return client.LeaveRoom(roomJID, nick)
+}
+
+// ToggleStatusSharing toggles status sharing for a contact
+// Returns the new state (true = sharing enabled)
+func (a *App) ToggleStatusSharing(contactJID string) (bool, error) {
+	a.mu.RLock()
+	currentAccount := a.currentAccount
+	client := a.xmppClient
+	a.mu.RUnlock()
+
+	if currentAccount == "" {
+		return false, fmt.Errorf("no account selected")
+	}
+
+	// For now, we'll store this in memory until storage is integrated
+	// TODO: Use storage.SetStatusSharing when DB is integrated into App
+	// For now, toggle and send appropriate presence
+
+	// If connected, send directed presence or hide
+	if client != nil && client.IsConnected() {
+		// Get current status
+		status := a.Status()
+		show := mapStatusToShow(status)
+
+		// Since we don't have persistent storage here yet, we'll just
+		// demonstrate by sending presence
+		// In production, you'd check/toggle the DB setting
+		// For now, return true to indicate "enabled" (we're sending presence)
+		if err := client.SendDirectedPresence(contactJID, show, a.statusMsg); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// GetContactFingerprints returns OMEMO fingerprints for a contact
+func (a *App) GetContactFingerprints(contactJID string) []string {
+	// TODO: Integrate with OMEMO manager when available
+	// For now, return placeholder fingerprints
+	// In production, this would query the OMEMO storage
+	return []string{
+		"No OMEMO fingerprints available",
+		"(OMEMO integration pending)",
+	}
+}
+
+// GetOwnFingerprint returns the own OMEMO fingerprint for an account
+func (a *App) GetOwnFingerprint(accountJID string) (string, uint32) {
+	// Check if account has OMEMO enabled
+	acc := a.GetAccount(accountJID)
+	if acc == nil || !acc.OMEMO {
+		return "", 0
+	}
+
+	// Check if account is connected
+	a.mu.RLock()
+	client, exists := a.clients[accountJID]
+	a.mu.RUnlock()
+
+	if !exists || client == nil || !client.IsConnected() {
+		return "", 0
+	}
+
+	// TODO: Integrate with actual OMEMO manager when available
+	// For now, return empty - will be populated when OMEMO is fully integrated
+	// The actual fingerprint would come from the OMEMO key store
+	return "", 0
+}
+
+// IsStatusSharingEnabled checks if status sharing is enabled for a contact
+func (a *App) IsStatusSharingEnabled(contactJID string) bool {
+	// TODO: Query storage when integrated
+	return false
 }
