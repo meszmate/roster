@@ -1,0 +1,81 @@
+# Roster Configuration Example
+# Copy this to ~/.config/roster/config.toml
+
+[general]
+# Data directory for messages, keys, etc.
+# Default: ~/.local/share/roster
+data_dir = "~/.local/share/roster"
+
+# Automatically connect on startup
+auto_connect = true
+
+[ui]
+# Theme to use (rainbow, hacker, or custom theme name)
+theme = "rainbow"
+
+# Roster panel position (left, right)
+roster_position = "left"
+
+# Roster panel width in characters
+roster_width = 30
+
+# Show message timestamps
+show_timestamps = true
+
+# Time format for timestamps (Go time format)
+time_format = "15:04"
+
+# Date format for dates (Go time format)
+date_format = "2006-01-02"
+
+# Enable desktop notifications
+notifications = true
+
+[encryption]
+# Default encryption method (omemo, otr, pgp, none)
+default = "omemo"
+
+# Require encryption for all messages
+require_encryption = true
+
+# Trust On First Use for OMEMO
+omemo_tofu = true
+
+[plugins]
+# List of enabled plugins
+enabled = ["statusnotify"]
+
+# Custom plugin directory
+# Default: ~/.local/share/roster/plugins
+plugin_dir = ""
+
+[logging]
+# Log level (debug, info, warn, error)
+level = "info"
+
+# Log file path
+# Default: ~/.local/share/roster/roster.log
+file = ""
+
+# Also log to console (for debugging)
+console = false
+
+[storage]
+# Save message history to database
+save_messages = true
+
+# Number of days to keep messages (0 = keep forever)
+# Set to a positive number to automatically delete older messages
+message_retention_days = 0
+
+# Save login sessions (allows restoring connection state)
+save_sessions = true
+
+# Save window state (remembers open chats on restart)
+save_window_state = true
+
+# Maximum message size to store in bytes (default: 1MB)
+max_message_size = 1048576
+
+# Run database vacuum on startup (compacts the database)
+vacuum_on_startup = false

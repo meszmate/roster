@@ -1,0 +1,54 @@
+# Roster Accounts Configuration
+# Copy this to ~/.config/roster/accounts.toml
+
+# You can configure multiple accounts
+# Each account is defined in an [[accounts]] section
+
+[[accounts]]
+# Your XMPP JID (e.g., user@example.com)
+jid = "user@example.com"
+
+# Password (leave empty to prompt on connect, or use keyring)
+password = ""
+
+# Use system keyring for password storage (recommended)
+use_keyring = true
+
+# Automatically connect this account on startup
+auto_connect = true
+
+# Enable OMEMO encryption for this account
+omemo = true
+
+# Server address (leave empty to use JID domain)
+server = ""
+
+# Server port (default: 5222)
+port = 5222
+
+# Resource name (default: roster)
+resource = "roster"
+
+# Priority for presence (default: 0)
+priority = 0
+
+
+# Example: Work account (disabled auto-connect)
+# [[accounts]]
+# jid = "work@company.com"
+# use_keyring = true
+# auto_connect = false
+# omemo = true
+# server = "xmpp.company.com"
+# port = 5222
+# resource = "roster-work"
+# priority = 10
+
+
+# Example: Legacy account with password in config (not recommended)
+# [[accounts]]
+# jid = "legacy@oldserver.net"
+# password = "secretpassword"
+# use_keyring = false
+# auto_connect = false
+# omemo = false

@@ -1,0 +1,68 @@
+# Rainbow Theme - A colorful, vibrant theme with rounded borders
+name = "rainbow"
+description = "A colorful, vibrant theme with rounded borders"
+
+[colors]
+primary = "#FF6B6B"
+secondary = "#4ECDC4"
+accent = "#FFE66D"
+background = "#2D3436"
+foreground = "#DFE6E9"
+muted = "#636E72"
+border = "#636E72"
+error = "#E74C3C"
+warning = "#F39C12"
+success = "#27AE60"
+online = "#00B894"
+away = "#FDCB6E"
+dnd = "#E74C3C"
+xa = "#E17055"
+offline = "#636E72"
+
+[roster]
+header_fg = "#2D3436"
+header_bg = "#FF6B6B"
+selected_fg = "#2D3436"
+selected_bg = "#4ECDC4"
+contact_fg = "#DFE6E9"
+group_fg = "#FFE66D"
+border_fg = "#636E72"
+unread_fg = "#FF6B6B"
+
+[chat]
+my_message_fg = "#2D3436"
+my_message_bg = "#4ECDC4"
+their_message_fg = "#DFE6E9"
+their_message_bg = "#3D4446"
+timestamp_fg = "#636E72"
+nick_fg = "#FF6B6B"
+encrypted_indicator = "#00B894"
+unencrypted_indicator = "#E74C3C"
+system_message_fg = "#636E72"
+typing_indicator_fg = "#FDCB6E"
+
+[statusbar]
+fg = "#DFE6E9"
+bg = "#1E2425"
+mode_normal = "#4ECDC4"
+mode_insert = "#FF6B6B"
+mode_command = "#FFE66D"
+account_fg = "#DFE6E9"
+status_fg = "#00B894"
+
+[commandline]
+prompt_fg = "#FF6B6B"
+input_fg = "#DFE6E9"
+input_bg = "#2D3436"
+cursor_fg = "#FFE66D"
+completion_fg = "#2D3436"
+completion_bg = "#4ECDC4"
+
+[dialogs]
+border_fg = "#FF6B6B"
+title_fg = "#FFE66D"
+content_fg = "#DFE6E9"
+button_fg = "#DFE6E9"
+button_bg = "#3D4446"
+button_active_fg = "#2D3436"
+button_active_bg = "#4ECDC4"

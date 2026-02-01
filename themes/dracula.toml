@@ -1,0 +1,68 @@
+# Dracula Theme - Purple dark modern aesthetic
+name = "dracula"
+description = "Dark theme with vibrant purple and pink accents"
+
+[colors]
+primary = "#BD93F9"
+secondary = "#FF79C6"
+accent = "#50FA7B"
+background = "#282A36"
+foreground = "#F8F8F2"
+muted = "#6272A4"
+border = "#44475A"
+error = "#FF5555"
+warning = "#F1FA8C"
+success = "#50FA7B"
+online = "#50FA7B"
+away = "#F1FA8C"
+dnd = "#FF5555"
+xa = "#FFB86C"
+offline = "#6272A4"
+
+[roster]
+header_fg = "#282A36"
+header_bg = "#BD93F9"
+selected_fg = "#282A36"
+selected_bg = "#FF79C6"
+contact_fg = "#F8F8F2"
+group_fg = "#BD93F9"
+border_fg = "#44475A"
+unread_fg = "#F1FA8C"
+
+[chat]
+my_message_fg = "#282A36"
+my_message_bg = "#BD93F9"
+their_message_fg = "#F8F8F2"
+their_message_bg = "#44475A"
+timestamp_fg = "#6272A4"
+nick_fg = "#FF79C6"
+encrypted_indicator = "#50FA7B"
+unencrypted_indicator = "#FF5555"
+system_message_fg = "#6272A4"
+typing_indicator_fg = "#F1FA8C"
+
+[statusbar]
+fg = "#F8F8F2"
+bg = "#21222C"
+mode_normal = "#BD93F9"
+mode_insert = "#50FA7B"
+mode_command = "#F1FA8C"
+account_fg = "#F8F8F2"
+status_fg = "#50FA7B"
+
+[commandline]
+prompt_fg = "#FF79C6"
+input_fg = "#F8F8F2"
+input_bg = "#282A36"
+cursor_fg = "#F8F8F2"
+completion_fg = "#282A36"
+completion_bg = "#BD93F9"
+
+[dialogs]
+border_fg = "#BD93F9"
+title_fg = "#FF79C6"
+content_fg = "#F8F8F2"
+button_fg = "#F8F8F2"
+button_bg = "#44475A"
+button_active_fg = "#282A36"
+button_active_bg = "#BD93F9"

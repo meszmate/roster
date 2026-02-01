@@ -1,0 +1,68 @@
+# Matrix Theme - Classic green terminal aesthetic
+name = "matrix"
+description = "Classic green-on-black terminal aesthetic inspired by The Matrix"
+
+[colors]
+primary = "#00FF00"
+secondary = "#00CC00"
+accent = "#33FF33"
+background = "#0A0A0A"
+foreground = "#00FF00"
+muted = "#006600"
+border = "#003300"
+error = "#FF0000"
+warning = "#FFFF00"
+success = "#00FF00"
+online = "#00FF00"
+away = "#CCFF00"
+dnd = "#FF0000"
+xa = "#FF6600"
+offline = "#333333"
+
+[roster]
+header_fg = "#0A0A0A"
+header_bg = "#00FF00"
+selected_fg = "#0A0A0A"
+selected_bg = "#00CC00"
+contact_fg = "#00FF00"
+group_fg = "#33FF33"
+border_fg = "#003300"
+unread_fg = "#FFFF00"
+
+[chat]
+my_message_fg = "#0A0A0A"
+my_message_bg = "#00CC00"
+their_message_fg = "#00FF00"
+their_message_bg = "#1A1A1A"
+timestamp_fg = "#006600"
+nick_fg = "#33FF33"
+encrypted_indicator = "#00FF00"
+unencrypted_indicator = "#FF0000"
+system_message_fg = "#006600"
+typing_indicator_fg = "#CCFF00"
+
+[statusbar]
+fg = "#00FF00"
+bg = "#000000"
+mode_normal = "#00FF00"
+mode_insert = "#FFFF00"
+mode_command = "#00FFFF"
+account_fg = "#00FF00"
+status_fg = "#00FF00"
+
+[commandline]
+prompt_fg = "#00FF00"
+input_fg = "#00FF00"
+input_bg = "#0A0A0A"
+cursor_fg = "#FFFFFF"
+completion_fg = "#0A0A0A"
+completion_bg = "#00CC00"
+
+[dialogs]
+border_fg = "#00FF00"
+title_fg = "#33FF33"
+content_fg = "#00FF00"
+button_fg = "#00FF00"
+button_bg = "#1A1A1A"
+button_active_fg = "#0A0A0A"
+button_active_bg = "#00FF00"
