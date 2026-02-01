@@ -16,6 +16,7 @@ import (
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
 	"github.com/meszmate/roster/internal/xmpp"
+	"github.com/meszmate/roster/internal/xmpp/register"
 )
 
 // EventType represents the type of event
@@ -75,6 +76,7 @@ const (
 	ActionWindowPrev
 	ActionSaveWindows
 	ActionLoadWindows
+	ActionShowRegister
 )
 
 // CommandActionMsg is sent when a command needs UI interaction
@@ -129,6 +131,29 @@ type CreateRoomResultMsg struct {
 // OperationTimeoutMsg is sent when an async operation times out
 type OperationTimeoutMsg struct {
 	Operation dialogs.OperationType
+}
+
+// RegisterFormMsg is sent when a registration form is received
+type RegisterFormMsg struct {
+	Server          string
+	Port            int
+	Fields          []register.RegistrationField
+	Instructions    string
+	IsDataForm      bool
+	FormType        string
+	RequiresCaptcha bool
+	Captcha         *register.CaptchaData
+	Error           string
+}
+
+// RegisterResultMsg is sent when a registration attempt completes
+type RegisterResultMsg struct {
+	Success  bool
+	JID      string
+	Password string
+	Server   string
+	Port     int
+	Error    string
 }
 
 // App represents the main application
@@ -595,6 +620,19 @@ func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 
 		case "loadw", "loadwindows":
 			return CommandActionMsg{Action: ActionLoadWindows}
+
+		case "register":
+			if len(args) >= 1 {
+				server := args[0]
+				port := 5222
+				if len(args) >= 2 {
+					if p, err := strconv.Atoi(args[1]); err == nil {
+						port = p
+					}
+				}
+				return a.FetchRegistrationForm(server, port)()
+			}
+			return CommandActionMsg{Action: ActionShowRegister}
 
 		default:
 			// Unknown command
@@ -1551,4 +1589,67 @@ func (a *App) GetOwnFingerprint(accountJID string) (string, uint32) {
 func (a *App) IsStatusSharingEnabled(contactJID string) bool {
 	// TODO: Query storage when integrated
 	return false
+}
+
+// FetchRegistrationForm fetches the registration form from a server
+func (a *App) FetchRegistrationForm(server string, port int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+		defer cancel()
+
+		form, err := register.FetchRegistrationForm(ctx, server, port)
+		if err != nil {
+			return RegisterFormMsg{
+				Server: server,
+				Port:   port,
+				Error:  err.Error(),
+			}
+		}
+
+		return RegisterFormMsg{
+			Server:          form.Server,
+			Port:            form.Port,
+			Fields:          form.Fields,
+			Instructions:    form.Instructions,
+			IsDataForm:      form.IsDataForm,
+			FormType:        form.FormType,
+			RequiresCaptcha: form.RequiresCaptcha,
+			Captcha:         form.Captcha,
+		}
+	}
+}
+
+// SubmitRegistration submits a registration form to the server
+func (a *App) SubmitRegistration(server string, port int, fields map[string]string, isDataForm bool, formType string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+		defer cancel()
+
+		result, err := register.SubmitRegistration(ctx, server, port, fields, isDataForm, formType)
+		if err != nil {
+			return RegisterResultMsg{
+				Success: false,
+				Server:  server,
+				Port:    port,
+				Error:   err.Error(),
+			}
+		}
+
+		if !result.Success {
+			return RegisterResultMsg{
+				Success: false,
+				Server:  server,
+				Port:    port,
+				Error:   result.Error,
+			}
+		}
+
+		return RegisterResultMsg{
+			Success:  true,
+			JID:      result.JID,
+			Password: fields["password"],
+			Server:   server,
+			Port:     port,
+		}
+	}
 }
