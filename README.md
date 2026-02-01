@@ -7,13 +7,15 @@ A modern, terminal-based XMPP/Jabber client written in Go with OMEMO encryption,
 - **Modern TUI**: Built with Bubble Tea for a reactive, fast interface
 - **Vim Motions**: Full vim-style navigation and editing
 - **OMEMO Encryption**: End-to-end encryption by default
+- **Account Registration**: In-app XMPP account registration with comprehensive CAPTCHA support (image, audio, video, Q&A)
 - **Plugin System**: Extend functionality with Go plugins
 - **Themes**: Multiple built-in themes (Rainbow, Matrix, Nord, Gruvbox, Dracula) with custom theme support
-- **Multi-Account**: Support for multiple XMPP accounts
-- **MUC Support**: Full multi-user chat room support
+- **Multi-Account**: Support for multiple XMPP accounts with easy switching
+- **MUC Support**: Full multi-user chat room support with room creation
 - **File Transfer**: HTTP File Upload with OMEMO encryption
 - **Message History**: SQLite-backed message storage
 - **20 Windows**: Quick window switching with Alt+1-0, Alt+q-p
+- **Scrollable Dialogs**: Help menu and long content with vim-style scrolling
 
 ## Installation
 
@@ -113,6 +115,27 @@ make init-config
 | `gA` | Focus accounts section |
 | `gl` | Toggle full account list |
 
+### Account Actions (in accounts section)
+
+| Key | Action |
+|-----|--------|
+| `C` | Connect account |
+| `D` | Disconnect account |
+| `E` | Edit account |
+| `X` | Remove account |
+| `H` | Show account info tooltip |
+
+### Dialog Navigation
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Next field |
+| `Shift+Tab` | Previous field |
+| `Enter` | Confirm / Toggle checkbox |
+| `Esc` | Cancel dialog |
+| `j` / `k` | Scroll (in help dialog) |
+| `g` / `G` | Top / Bottom (in help dialog) |
+
 ## Commands
 
 Commands are entered in command mode (press `:` first):
@@ -122,6 +145,7 @@ Commands are entered in command mode (press `:` first):
 | `:quit`, `:q` | Quit roster |
 | `:connect <jid> <pass> [server] [port]` | Quick connect (session only) |
 | `:account add` | Add saved account |
+| `:register` | Register new account on a server |
 | `:disconnect` | Disconnect |
 | `:msg <jid> <message>` | Send message |
 | `:join <room>` | Join MUC room |
@@ -225,6 +249,30 @@ enabled = ["statusnotify"]
 ### Developing Plugins
 
 See [docs/plugins.md](docs/plugins.md) for the plugin development guide.
+
+## Account Registration
+
+Register new XMPP accounts directly from the client using `:register`:
+
+1. Enter the server domain (e.g., `example.com`)
+2. Fill in the registration form (username, password, etc.)
+3. Complete any CAPTCHA challenge if required
+4. Optionally save and connect to the new account
+
+### CAPTCHA Support
+
+Roster supports a wide range of CAPTCHA types commonly used by XMPP servers:
+
+- **Image CAPTCHA**: OCR challenges with embedded or URL-based images
+- **Audio CAPTCHA**: Audio recognition challenges
+- **Video CAPTCHA**: Video-based verification
+- **Q&A CAPTCHA**: Text-based security questions
+- **Data Forms**: XEP-0004 compliant registration forms
+
+When a CAPTCHA is required:
+- Press `V` to view/open the CAPTCHA media
+- Press `C` to copy the CAPTCHA URL to clipboard
+- Enter your answer in the designated field
 
 ## Encryption
 
