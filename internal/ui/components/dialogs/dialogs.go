@@ -31,11 +31,19 @@ const (
 	DialogPassword
 	DialogSettings
 	DialogContextHelp
-	DialogAccountRemove
-	DialogLoading
 	DialogRegister
 	DialogRegisterForm
 	DialogRegisterSuccess
+)
+
+// DialogAction represents what action triggered the dialog result
+type DialogAction int
+
+const (
+	ActionConfirm DialogAction = iota
+	ActionCancel
+	ActionViewCaptcha
+	ActionCopyURL
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -116,13 +124,6 @@ type DialogInput struct {
 	Cursor   int
 	Password bool
 	ReadOnly bool // If true, field is not editable (for display only)
-}
-
-// DialogCheckbox represents a checkbox in a dialog
-type DialogCheckbox struct {
-	Label   string
-	Key     string
-	Checked bool
 }
 
 // New creates a new dialog model
@@ -289,6 +290,7 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	// Add command summaries
 	cmdList := []string{
 		"connect <jid> <pass> [server] [port]",
+		"register [server] [port] - Register new account",
 		"account add    - Add saved account",
 		"account edit <jid> - Edit account",
 		"account resource <jid> <name> - Set resource",
@@ -468,67 +470,6 @@ func (m Model) ShowContextHelp(context string, content string) Model {
 	return m
 }
 
-// ShowAccountRemoveConfirm shows a confirmation dialog for removing an account
-func (m Model) ShowAccountRemoveConfirm(jid string, isSession bool) Model {
-	m.dialogType = DialogAccountRemove
-	m.title = "Remove Account"
-
-	accountType := "saved"
-	if isSession {
-		accountType = "session"
-	}
-
-	m.message = "Are you sure you want to remove this " + accountType + " account?\n\n" +
-		"  " + jid + "\n\n" +
-		"This action cannot be undone."
-
-	m.buttons = []string{"Remove", "Cancel"}
-	m.activeBtn = 1 // Default to Cancel for safety
-	m.inputs = nil
-	m.checkboxes = nil
-	m.data["jid"] = jid
-	return m
-}
-
-// ShowCreateRoom shows the create room dialog
-func (m Model) ShowCreateRoom() Model {
-	m.dialogType = DialogCreateRoom
-	m.title = "Create Room"
-	m.message = ""
-	m.inputs = []DialogInput{
-		{Label: "Room JID (room@conference.server)", Key: "room_jid", Value: ""},
-		{Label: "Nickname", Key: "nick", Value: ""},
-		{Label: "Room Name (optional)", Key: "name", Value: ""},
-		{Label: "Description (optional)", Key: "desc", Value: ""},
-		{Label: "Password (optional)", Key: "password", Value: "", Password: true},
-	}
-	m.checkboxes = []DialogCheckbox{
-		{Label: "Use defaults (instant room)", Key: "defaults", Checked: true},
-		{Label: "Members only", Key: "members_only", Checked: false},
-		{Label: "Persistent", Key: "persistent", Checked: false},
-	}
-	m.activeInput = 0
-	m.activeCheckbox = 0
-	m.inCheckboxes = false
-	m.buttons = []string{"Create", "Cancel"}
-	m.activeBtn = 0
-	return m
-}
-
-// Hide hides the dialog
-func (m Model) Hide() Model {
-	m.dialogType = DialogNone
-	m.inputs = nil
-	m.checkboxes = nil
-	m.inCheckboxes = false
-	m.operationType = OpNone
-	m.spinnerFrame = 0
-	m.scrollOffset = 0
-	m.maxVisibleLines = 0
-	m.data = make(map[string]string)
-	return m
-}
-
 // RegistrationField represents a field in the registration form
 type RegistrationField struct {
 	Name     string
@@ -560,8 +501,6 @@ func (m Model) ShowRegister() Model {
 		{Label: "Server (e.g., example.com)", Key: "server", Value: ""},
 		{Label: "Port (default: 5222)", Key: "port", Value: ""},
 	}
-	m.checkboxes = nil
-	m.inCheckboxes = false
 	m.activeInput = 0
 	m.buttons = []string{"Fetch Form", "Cancel"}
 	m.activeBtn = 0
@@ -658,8 +597,6 @@ func (m Model) ShowRegisterForm(server string, port int, fields []RegistrationFi
 		}
 	}
 	m.inputs = visibleInputs
-	m.checkboxes = nil
-	m.inCheckboxes = false
 	m.activeInput = 0
 
 	m.buttons = []string{"Register", "Cancel"}
@@ -686,8 +623,6 @@ func (m Model) ShowRegisterSuccess(jid, password, server string, port int) Model
 	m.title = "Registration Successful"
 	m.message = "Account created: " + jid
 	m.inputs = nil
-	m.checkboxes = nil
-	m.inCheckboxes = false
 	m.buttons = []string{"Save & Connect", "Save Only", "Close"}
 	m.activeBtn = 0
 	m.data["jid"] = jid
@@ -788,42 +723,12 @@ func formatMediaDetails(captcha *CaptchaInfo, mediaType string) string {
 	}
 
 	// Security warning only for URLs opened in browser (not for embedded data)
+	// URLs could lead to webpages with tracking scripts instead of direct media
 	if hasURL && !hasEmbeddedData {
 		msg += "\n\nNote: Opens in browser. URL may track your IP."
 	}
 
 	return msg
-}
-
-// getInputViewport returns the visible portion of input text with cursor in view
-// Returns: (displayText, cursorPosInDisplay, startOffset)
-func getInputViewport(value string, cursor int, maxWidth int) (string, int, int) {
-	if len(value) <= maxWidth {
-		return value, cursor, 0
-	}
-
-	// Keep cursor visible with some context around it
-	halfWidth := maxWidth / 2
-
-	var start, end int
-	if cursor <= halfWidth {
-		// Cursor near start - show from beginning
-		start = 0
-		end = maxWidth
-	} else if cursor >= len(value)-halfWidth {
-		// Cursor near end - show last portion
-		start = len(value) - maxWidth
-		end = len(value)
-	} else {
-		// Cursor in middle - center around cursor
-		start = cursor - halfWidth
-		end = start + maxWidth
-	}
-
-	displayText := value[start:end]
-	cursorInDisplay := cursor - start
-
-	return displayText, cursorInDisplay, start
 }
 
 // getChallengeDescription returns a human-readable description of the challenge type
@@ -850,6 +755,20 @@ func getChallengeDescription(challenge string) string {
 	default:
 		return ""
 	}
+}
+
+// Hide hides the dialog
+func (m Model) Hide() Model {
+	m.dialogType = DialogNone
+	m.inputs = nil
+	m.checkboxes = nil
+	m.inCheckboxes = false
+	m.operationType = OpNone
+	m.spinnerFrame = 0
+	m.scrollOffset = 0
+	m.maxVisibleLines = 0
+	m.data = make(map[string]string)
+	return m
 }
 
 // SetViewerStatus updates the CAPTCHA viewer field with a status message
@@ -881,54 +800,6 @@ func (m Model) RestoreViewer() Model {
 	return m
 }
 
-// ShowLoading shows a loading dialog with spinner and cancel button
-func (m Model) ShowLoading(message string, operation OperationType) Model {
-	m.dialogType = DialogLoading
-	m.title = "Please Wait"
-	m.message = message
-	m.inputs = nil
-	m.checkboxes = nil
-	m.inCheckboxes = false
-	m.buttons = []string{"Cancel"}
-	m.activeBtn = 0
-	m.spinnerFrame = 0
-	m.operationType = operation
-	return m
-}
-
-// IsLoading returns true if a loading dialog is active
-func (m Model) IsLoading() bool {
-	return m.dialogType == DialogLoading
-}
-
-// HideLoading hides the loading dialog without affecting other state
-func (m Model) HideLoading() Model {
-	if m.dialogType == DialogLoading {
-		m.dialogType = DialogNone
-		m.operationType = OpNone
-		m.spinnerFrame = 0
-	}
-	return m
-}
-
-// GetOperationType returns the current operation type
-func (m Model) GetOperationType() OperationType {
-	return m.operationType
-}
-
-// SpinnerTick returns a command that sends a spinner tick after a delay
-func SpinnerTick() tea.Cmd {
-	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
-		return SpinnerTickMsg{}
-	})
-}
-
-// AdvanceSpinner advances the spinner frame
-func (m Model) AdvanceSpinner() Model {
-	m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
-	return m
-}
-
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	if !m.Active() {
@@ -943,17 +814,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Special handling for loading dialog - only allow cancel
-		if m.dialogType == DialogLoading {
-			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyEnter {
-				op := m.operationType
-				m = m.Hide()
-				return m, func() tea.Msg { return CancelOperationMsg{Operation: op} }
-			}
-			// Ignore other keys in loading dialog
-			return m, nil
-		}
-
 		// Handle 'V' (uppercase) key for viewing CAPTCHA in registration form
 		// Only trigger when focused on the read-only CAPTCHA viewer field
 		captchaType := m.data["_captchaType"]
@@ -1006,50 +866,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						return m, func() tea.Msg { return result }
 					}
 				}
-			}
-		}
-
-		// Handle scrolling for help dialog
-		if m.dialogType == DialogHelp {
-			lines := strings.Split(m.message, "\n")
-			maxScroll := len(lines) - m.maxVisibleLines
-			if maxScroll < 0 {
-				maxScroll = 0
-			}
-
-			switch msg.String() {
-			case "j", "down":
-				if m.scrollOffset < maxScroll {
-					m.scrollOffset++
-				}
-				return m, nil
-			case "k", "up":
-				if m.scrollOffset > 0 {
-					m.scrollOffset--
-				}
-				return m, nil
-			case "g":
-				// Go to top
-				m.scrollOffset = 0
-				return m, nil
-			case "G":
-				// Go to bottom
-				m.scrollOffset = maxScroll
-				return m, nil
-			case "ctrl+d":
-				// Half page down
-				m.scrollOffset += m.maxVisibleLines / 2
-				if m.scrollOffset > maxScroll {
-					m.scrollOffset = maxScroll
-				}
-				return m, nil
-			case "ctrl+u":
-				// Half page up
-				m.scrollOffset -= m.maxVisibleLines / 2
-				if m.scrollOffset < 0 {
-					m.scrollOffset = 0
-				}
-				return m, nil
 			}
 		}
 
@@ -1203,12 +1019,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case tea.KeyRunes:
-			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) && !m.inCheckboxes {
+			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
 				input := &m.inputs[m.activeInput]
 				// Skip read-only fields
 				if !input.ReadOnly {
 					input.Value = input.Value[:input.Cursor] + string(msg.Runes) + input.Value[input.Cursor:]
 					input.Cursor += len(msg.Runes)
+				}
+			}
+
+		case tea.KeySpace:
+			if len(m.inputs) > 0 && m.activeInput < len(m.inputs) {
+				input := &m.inputs[m.activeInput]
+				// Skip read-only fields
+				if !input.ReadOnly {
+					input.Value = input.Value[:input.Cursor] + " " + input.Value[input.Cursor:]
+					input.Cursor++
 				}
 			}
 		}
@@ -1345,14 +1171,14 @@ func (m Model) View() string {
 		var rendered string
 		if input.ReadOnly {
 			// Read-only field - no cursor, just highlight when focused
-			if i == m.activeInput && !m.inCheckboxes {
-				rendered = m.styles.InputFocused.Render(label + prefix + displayValue + suffix)
+			if i == m.activeInput {
+				rendered = m.styles.InputFocused.Render(label + value)
 			} else {
-				rendered = m.styles.InputNormal.Render(label + prefix + displayValue + suffix)
+				rendered = m.styles.InputNormal.Render(label + value)
 			}
-		} else if i == m.activeInput && !m.inCheckboxes {
+		} else if i == m.activeInput {
 			// Show cursor for editable fields
-			beforeCursor := displayValue
+			beforeCursor := value
 			cursorChar := " "
 			afterCursor := ""
 			if displayCursor < len(displayValue) {

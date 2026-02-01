@@ -7,6 +7,7 @@ A modern, terminal-based XMPP/Jabber client written in Go with OMEMO encryption,
 - **Modern TUI**: Built with Bubble Tea for a reactive, fast interface
 - **Vim Motions**: Full vim-style navigation and editing
 - **OMEMO Encryption**: End-to-end encryption by default
+- **In-Band Registration**: Register new accounts directly from the client with comprehensive CAPTCHA support
 - **Plugin System**: Extend functionality with Go plugins
 - **Themes**: Multiple built-in themes (Rainbow, Matrix, Nord, Gruvbox, Dracula) with custom theme support
 - **Multi-Account**: Support for multiple XMPP accounts
@@ -120,6 +121,7 @@ Commands are entered in command mode (press `:` first):
 | Command | Description |
 |---------|-------------|
 | `:quit`, `:q` | Quit roster |
+| `:register [server] [port]` | Register new account on server |
 | `:connect <jid> <pass> [server] [port]` | Quick connect (session only) |
 | `:account add` | Add saved account |
 | `:disconnect` | Disconnect |
@@ -169,6 +171,91 @@ omemo_tofu = true
 [plugins]
 enabled = ["statusnotify"]
 ```
+
+## Account Registration (XEP-0077)
+
+Roster supports comprehensive in-band registration, allowing you to create new XMPP accounts directly from the client with support for virtually any server's registration requirements.
+
+### Basic Usage
+
+```
+:register example.com
+```
+
+Or with a custom port:
+
+```
+:register example.com 5222
+```
+
+### Registration Flow
+
+1. Enter `:register <server>` to fetch the registration form
+2. Fill in the required fields (username, password, etc.)
+3. If CAPTCHA is required:
+   - Tab to the CAPTCHA field
+   - Press `V` to view/play the CAPTCHA media
+   - Press `C` to copy the CAPTCHA URL to clipboard
+   - Enter the CAPTCHA answer
+4. Press `Enter` to submit
+5. On success, choose to "Save & Connect", "Save Only", or "Close"
+
+### Supported Standards
+
+Roster implements comprehensive XMPP registration support:
+
+- **XEP-0077**: In-Band Registration (legacy and data form modes)
+- **XEP-0004**: Data Forms (all field types: text, password, boolean, list, multi-line, etc.)
+- **XEP-0158**: CAPTCHA Forms (all challenge types)
+- **XEP-0221**: Data Forms Media Element
+- **XEP-0231**: Bits of Binary (embedded media)
+
+### CAPTCHA Support
+
+Roster supports all standard CAPTCHA types defined in XEP-0158:
+
+| Type | Description |
+|------|-------------|
+| `ocr` | Image with text to transcribe |
+| `picture_q` | Image with a question to answer |
+| `picture_recog` | Image to identify |
+| `audio_recog` | Audio to describe |
+| `speech_recog` | Spoken words to transcribe |
+| `speech_q` | Audio question to answer |
+| `video_recog` | Video to identify |
+| `video_q` | Video question to answer |
+| `qa` | Text-based question and answer |
+
+### Media Delivery Methods
+
+All standard media delivery methods are supported:
+
+- **HTTP/HTTPS URLs**: Direct links to media files
+- **Embedded Data (XEP-0231)**: Base64-encoded media in the stanza
+- **Data URIs (RFC 2397)**: Inline base64 data
+
+Supported media formats:
+- **Images**: PNG, JPEG, GIF, WebP, BMP, SVG
+- **Audio**: WAV, MP3, OGG, WebM, FLAC, AAC, Speex
+- **Video**: MP4, MPEG, WebM, OGG, QuickTime, AVI
+
+### Viewing CAPTCHA
+
+When focused on the CAPTCHA field:
+- Press `V` to open the media in your system viewer
+- Press `C` to copy the URL to clipboard (if available)
+
+Supported viewers:
+- **macOS**: Opens with default application
+- **Windows**: Opens with default application
+- **Linux**: xdg-open, eog, gwenview, feh, sxiv, imv, and more
+
+### Clipboard Support
+
+URL copying works on all platforms:
+- **macOS**: pbcopy
+- **Windows**: clip
+- **Linux**: xclip, xsel, or wl-copy (Wayland)
 
 ## Themes
 
