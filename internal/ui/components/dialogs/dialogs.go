@@ -102,6 +102,10 @@ type Model struct {
 	// Loading dialog state
 	spinnerFrame  int
 	operationType OperationType
+
+	// Scroll state for help dialog
+	scrollOffset   int
+	maxVisibleLines int
 }
 
 // DialogInput represents an input field in a dialog
@@ -302,6 +306,8 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	m.buttons = []string{"Close"}
 	m.activeBtn = 0
 	m.inputs = nil
+	m.scrollOffset = 0
+	m.maxVisibleLines = 20 // Number of visible lines in help dialog
 	return m
 }
 
@@ -517,6 +523,8 @@ func (m Model) Hide() Model {
 	m.inCheckboxes = false
 	m.operationType = OpNone
 	m.spinnerFrame = 0
+	m.scrollOffset = 0
+	m.maxVisibleLines = 0
 	m.data = make(map[string]string)
 	return m
 }
@@ -787,6 +795,37 @@ func formatMediaDetails(captcha *CaptchaInfo, mediaType string) string {
 	return msg
 }
 
+// getInputViewport returns the visible portion of input text with cursor in view
+// Returns: (displayText, cursorPosInDisplay, startOffset)
+func getInputViewport(value string, cursor int, maxWidth int) (string, int, int) {
+	if len(value) <= maxWidth {
+		return value, cursor, 0
+	}
+
+	// Keep cursor visible with some context around it
+	halfWidth := maxWidth / 2
+
+	var start, end int
+	if cursor <= halfWidth {
+		// Cursor near start - show from beginning
+		start = 0
+		end = maxWidth
+	} else if cursor >= len(value)-halfWidth {
+		// Cursor near end - show last portion
+		start = len(value) - maxWidth
+		end = len(value)
+	} else {
+		// Cursor in middle - center around cursor
+		start = cursor - halfWidth
+		end = start + maxWidth
+	}
+
+	displayText := value[start:end]
+	cursorInDisplay := cursor - start
+
+	return displayText, cursorInDisplay, start
+}
+
 // getChallengeDescription returns a human-readable description of the challenge type
 func getChallengeDescription(challenge string) string {
 	switch challenge {
@@ -860,6 +899,16 @@ func (m Model) ShowLoading(message string, operation OperationType) Model {
 // IsLoading returns true if a loading dialog is active
 func (m Model) IsLoading() bool {
 	return m.dialogType == DialogLoading
+}
+
+// HideLoading hides the loading dialog without affecting other state
+func (m Model) HideLoading() Model {
+	if m.dialogType == DialogLoading {
+		m.dialogType = DialogNone
+		m.operationType = OpNone
+		m.spinnerFrame = 0
+	}
+	return m
 }
 
 // GetOperationType returns the current operation type
@@ -957,6 +1006,50 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						return m, func() tea.Msg { return result }
 					}
 				}
+			}
+		}
+
+		// Handle scrolling for help dialog
+		if m.dialogType == DialogHelp {
+			lines := strings.Split(m.message, "\n")
+			maxScroll := len(lines) - m.maxVisibleLines
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+
+			switch msg.String() {
+			case "j", "down":
+				if m.scrollOffset < maxScroll {
+					m.scrollOffset++
+				}
+				return m, nil
+			case "k", "up":
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+				return m, nil
+			case "g":
+				// Go to top
+				m.scrollOffset = 0
+				return m, nil
+			case "G":
+				// Go to bottom
+				m.scrollOffset = maxScroll
+				return m, nil
+			case "ctrl+d":
+				// Half page down
+				m.scrollOffset += m.maxVisibleLines / 2
+				if m.scrollOffset > maxScroll {
+					m.scrollOffset = maxScroll
+				}
+				return m, nil
+			case "ctrl+u":
+				// Half page up
+				m.scrollOffset -= m.maxVisibleLines / 2
+				if m.scrollOffset < 0 {
+					m.scrollOffset = 0
+				}
+				return m, nil
 			}
 		}
 
@@ -1161,10 +1254,41 @@ func (m Model) View() string {
 	b.WriteString(title)
 	b.WriteString("\n\n")
 
-	// Message
+	// Message (with scroll support for help dialog)
 	if m.message != "" {
-		b.WriteString(m.styles.DialogContent.Render(m.message))
-		b.WriteString("\n\n")
+		if m.dialogType == DialogHelp && m.maxVisibleLines > 0 {
+			// Scrollable help content
+			lines := strings.Split(m.message, "\n")
+			totalLines := len(lines)
+
+			// Calculate visible range
+			start := m.scrollOffset
+			end := start + m.maxVisibleLines
+			if end > totalLines {
+				end = totalLines
+			}
+
+			// Show "more above" indicator
+			if start > 0 {
+				b.WriteString(m.styles.DialogContent.Render("+" + strconv.Itoa(start) + " more above (k/up to scroll)"))
+				b.WriteString("\n")
+			}
+
+			// Show visible lines
+			visibleLines := lines[start:end]
+			b.WriteString(m.styles.DialogContent.Render(strings.Join(visibleLines, "\n")))
+			b.WriteString("\n")
+
+			// Show "more below" indicator
+			remaining := totalLines - end
+			if remaining > 0 {
+				b.WriteString(m.styles.DialogContent.Render("+" + strconv.Itoa(remaining) + " more below (j/down to scroll)"))
+			}
+			b.WriteString("\n")
+		} else {
+			b.WriteString(m.styles.DialogContent.Render(m.message))
+			b.WriteString("\n\n")
+		}
 	}
 
 	// Inputs
@@ -1177,28 +1301,69 @@ func (m Model) View() string {
 			value = strings.Repeat("*", len(value))
 		}
 
+		// Calculate available width for input value
+		// Dialog width 50 - border (2) - padding (4) = 44 content area
+		// Input styling adds border (2) + padding (2) = 4 overhead
+		// So label + value can be up to 40 chars
+		availableWidth := 40 - len(label)
+		if availableWidth < 6 {
+			availableWidth = 6 // Minimum usable width
+		}
+
+		// Apply viewport for long text
+		displayValue := value
+		displayCursor := input.Cursor
+		var viewportStart int
+		if len(value) > availableWidth {
+			displayValue, displayCursor, viewportStart = getInputViewport(value, input.Cursor, availableWidth)
+		}
+
+		// Add overflow indicators
+		hasLeftOverflow := viewportStart > 0
+		hasRightOverflow := viewportStart+len(displayValue) < len(value)
+
+		prefix := ""
+		suffix := ""
+		if hasLeftOverflow {
+			prefix = "<"
+			if len(displayValue) > 1 {
+				displayValue = displayValue[1:] // Make room for indicator
+			}
+		}
+		if hasRightOverflow {
+			suffix = ">"
+			if len(displayValue) > 1 {
+				displayValue = displayValue[:len(displayValue)-1] // Make room for indicator
+			}
+		}
+
+		// Adjust cursor position if we added left overflow indicator
+		if hasLeftOverflow && displayCursor > 0 {
+			displayCursor--
+		}
+
 		var rendered string
 		if input.ReadOnly {
 			// Read-only field - no cursor, just highlight when focused
 			if i == m.activeInput && !m.inCheckboxes {
-				rendered = m.styles.InputFocused.Render(label + value)
+				rendered = m.styles.InputFocused.Render(label + prefix + displayValue + suffix)
 			} else {
-				rendered = m.styles.InputNormal.Render(label + value)
+				rendered = m.styles.InputNormal.Render(label + prefix + displayValue + suffix)
 			}
 		} else if i == m.activeInput && !m.inCheckboxes {
 			// Show cursor for editable fields
-			beforeCursor := value
+			beforeCursor := displayValue
 			cursorChar := " "
 			afterCursor := ""
-			if input.Cursor < len(value) {
-				beforeCursor = value[:input.Cursor]
-				cursorChar = string(value[input.Cursor])
-				afterCursor = value[input.Cursor+1:]
+			if displayCursor < len(displayValue) {
+				beforeCursor = displayValue[:displayCursor]
+				cursorChar = string(displayValue[displayCursor])
+				afterCursor = displayValue[displayCursor+1:]
 			}
 			cursor := lipgloss.NewStyle().Reverse(true).Render(cursorChar)
-			rendered = m.styles.InputFocused.Render(label + beforeCursor + cursor + afterCursor)
+			rendered = m.styles.InputFocused.Render(label + prefix + beforeCursor + cursor + afterCursor + suffix)
 		} else {
-			rendered = m.styles.InputNormal.Render(label + value)
+			rendered = m.styles.InputNormal.Render(label + prefix + displayValue + suffix)
 		}
 
 		b.WriteString(rendered)
