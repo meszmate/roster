@@ -305,6 +305,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogs.New(styles)
 			m.updateComponentSizes()
 		}
+
+	case app.RegisterFormMsg:
+		if msg.Error != "" {
+			m.dialog = m.dialog.HideLoading()
+			m.dialog = m.dialog.ShowError("Failed to fetch registration form: " + msg.Error)
+			m.focus = FocusDialog
+		} else {
+			m.dialog = m.dialog.HideLoading()
+			// Convert register.CaptchaData to dialogs.CaptchaInfo
+			var captchaInfo *dialogs.CaptchaInfo
+			if msg.Captcha != nil {
+				captchaInfo = &dialogs.CaptchaInfo{
+					Type:      msg.Captcha.Type,
+					Challenge: msg.Captcha.Challenge,
+					MimeType:  msg.Captcha.MimeType,
+					Data:      msg.Captcha.Data,
+					URLs:      msg.Captcha.URLs,
+					URL:       msg.Captcha.URL,
+					Question:  msg.Captcha.Question,
+					FieldVar:  msg.Captcha.FieldVar,
+				}
+			}
+			// Convert register.RegistrationField to dialogs.RegistrationField
+			dialogFields := make([]dialogs.RegistrationField, len(msg.Fields))
+			for i, f := range msg.Fields {
+				dialogFields[i] = dialogs.RegistrationField{
+					Name:     f.Name,
+					Label:    f.Label,
+					Required: f.Required,
+					Password: f.Password,
+					Type:     f.Type,
+					Value:    f.Value,
+				}
+			}
+			m.dialog = m.dialog.ShowRegisterForm(
+				msg.Server, msg.Port, dialogFields, msg.Instructions,
+				msg.IsDataForm, msg.FormType, captchaInfo,
+			)
+			m.focus = FocusDialog
+		}
+
+	case app.RegisterResultMsg:
+		if msg.Error != "" {
+			m.dialog = m.dialog.HideLoading()
+			m.dialog = m.dialog.ShowError("Registration failed: " + msg.Error)
+			m.focus = FocusDialog
+		} else {
+			m.dialog = m.dialog.HideLoading()
+			m.dialog = m.dialog.ShowRegisterSuccess(msg.JID, msg.Password, msg.Server, msg.Port)
+			m.focus = FocusDialog
+		}
 	}
 
 	// Update status bar with current state
@@ -1476,6 +1527,10 @@ func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
 		m.dialog = m.dialog.ShowSettingsList(settings)
 		m.focus = FocusDialog
 
+	case app.ActionShowRegister:
+		m.dialog = m.dialog.ShowRegister()
+		m.focus = FocusDialog
+
 	case app.ActionSwitchWindow:
 		if winStr, ok := msg.Data["window"].(string); ok {
 			if win, err := strconv.Atoi(winStr); err == nil && win >= 1 && win <= 20 {
@@ -1669,6 +1724,105 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				m.app.RemoveAccount(jid)
 			}
 		}
+
+	case dialogs.DialogRegister:
+		if result.Confirmed {
+			server := result.Values["server"]
+			portStr := result.Values["port"]
+			port := 5222
+			if portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					port = p
+				}
+			}
+			if server != "" {
+				m.dialog = m.dialog.ShowLoading("Fetching registration form...", dialogs.OpRegisterFetch)
+				m.focus = FocusDialog
+				return tea.Batch(dialogs.SpinnerTick(), m.app.FetchRegistrationForm(server, port))
+			}
+		}
+
+	case dialogs.DialogRegisterForm:
+		if result.Confirmed {
+			// Extract server/port from stored data
+			server := result.Values["server"]
+			portStr := result.Values["port"]
+			port := 5222
+			if portStr != "" {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					port = p
+				}
+			}
+			// Get form metadata
+			isDataForm := result.Values["_isDataForm"] == "true"
+			formType := result.Values["_formType"]
+
+			// Build fields map for submission (exclude internal keys)
+			fields := make(map[string]string)
+			for k, v := range result.Values {
+				// Skip internal keys and metadata
+				if strings.HasPrefix(k, "_") || k == "server" || k == "port" {
+					continue
+				}
+				fields[k] = v
+			}
+
+			// Add hidden fields
+			for k, v := range result.Values {
+				if strings.HasPrefix(k, "_hidden_") {
+					fieldName := strings.TrimPrefix(k, "_hidden_")
+					fields[fieldName] = v
+				}
+			}
+
+			// Show loading and submit registration
+			m.dialog = m.dialog.ShowLoading("Registering account...", dialogs.OpRegisterSubmit)
+			m.focus = FocusDialog
+			return tea.Batch(dialogs.SpinnerTick(), m.app.SubmitRegistration(server, port, fields, isDataForm, formType))
+		}
+
+	case dialogs.DialogRegisterSuccess:
+		jid := result.Values["jid"]
+		password := result.Values["password"]
+		server := result.Values["server"]
+		portStr := result.Values["port"]
+		port := 5222
+		if portStr != "" {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				port = p
+			}
+		}
+
+		// Button 0 = "Save & Connect", Button 1 = "Save Only", Button 2 = "Close"
+		if result.Button == 0 {
+			// Save account and connect
+			acc := config.Account{
+				JID:      jid,
+				Password: password,
+				Server:   server,
+				Port:     port,
+				Resource: "roster",
+				OMEMO:    true,
+				Session:  true,
+			}
+			m.app.AddSessionAccount(acc)
+			m.focus = FocusRoster
+			return m.app.ExecuteCommand("connect", []string{jid})
+		} else if result.Button == 1 {
+			// Save only, don't connect
+			acc := config.Account{
+				JID:      jid,
+				Password: password,
+				Server:   server,
+				Port:     port,
+				Resource: "roster",
+				OMEMO:    true,
+				Session:  true,
+			}
+			m.app.AddSessionAccount(acc)
+			m.chat = m.chat.SetStatusMsg("Account saved: " + jid)
+		}
+		// Button 2 = "Close" - just close dialog (handled by default)
 	}
 
 	m.focus = FocusRoster
