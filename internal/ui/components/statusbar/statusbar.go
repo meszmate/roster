@@ -19,14 +19,15 @@ type WindowInfo struct {
 
 // Model represents the status bar component
 type Model struct {
-	width     int
-	mode      keybindings.Mode
-	account   string
-	status    string
-	connected bool
-	styles    *theme.Styles
-	extraInfo string
-	windows   []WindowInfo
+	width         int
+	mode          keybindings.Mode
+	account       string
+	status        string
+	connected     bool
+	styles        *theme.Styles
+	extraInfo     string
+	windows       []WindowInfo
+	windowAccount string // Account bound to current window
 }
 
 // New creates a new status bar model
@@ -77,6 +78,12 @@ func (m Model) SetExtraInfo(info string) Model {
 // SetWindows sets the window list for display
 func (m Model) SetWindows(windows []WindowInfo) Model {
 	m.windows = windows
+	return m
+}
+
+// SetWindowAccount sets the account bound to the current window
+func (m Model) SetWindowAccount(acc string) Model {
+	m.windowAccount = acc
 	return m
 }
 
@@ -166,8 +173,19 @@ func (m Model) View() string {
 		windowsStr = "[" + strings.Join(parts, " ") + "]"
 	}
 
+	// Window account indicator (if different from main account)
+	windowAccStr := ""
+	if m.windowAccount != "" && m.windowAccount != m.account {
+		// Show just the user part of the JID
+		windowAcc := m.windowAccount
+		if idx := strings.Index(windowAcc, "@"); idx > 0 {
+			windowAcc = windowAcc[:idx]
+		}
+		windowAccStr = " | Win:" + windowAcc
+	}
+
 	// Build left and right parts
-	left := fmt.Sprintf(" %s %s %s%s", modeText, connStatus, accountText, statusText)
+	left := fmt.Sprintf(" %s %s %s%s%s", modeText, connStatus, accountText, statusText, windowAccStr)
 	right := windowsStr + extra + " "
 
 	// Calculate padding

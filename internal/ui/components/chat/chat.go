@@ -46,6 +46,11 @@ type Model struct {
 	searchMatches []int
 	searchIndex int
 	statusMsg   string  // Current activity/status message
+
+	// Chat header state
+	headerFocused  bool
+	headerSelected int              // 0=edit, 1=sharing, 2=verify, 3=details
+	contactData    *ContactDetailData // Contact info for header display
 }
 
 // New creates a new chat model
@@ -241,6 +246,48 @@ func (m Model) ClearStatusMsg() Model {
 	return m
 }
 
+// SetHeaderFocused sets whether the header is focused
+func (m Model) SetHeaderFocused(focused bool) Model {
+	m.headerFocused = focused
+	if focused {
+		m.headerSelected = 0
+	}
+	return m
+}
+
+// IsHeaderFocused returns whether the header is focused
+func (m Model) IsHeaderFocused() bool {
+	return m.headerFocused
+}
+
+// SetContactData sets the contact data for header display
+func (m Model) SetContactData(data *ContactDetailData) Model {
+	m.contactData = data
+	return m
+}
+
+// HeaderNavigateLeft moves header selection left
+func (m Model) HeaderNavigateLeft() Model {
+	if m.headerSelected > 0 {
+		m.headerSelected--
+	}
+	return m
+}
+
+// HeaderNavigateRight moves header selection right
+func (m Model) HeaderNavigateRight() Model {
+	if m.headerSelected < 3 {
+		m.headerSelected++
+	}
+	return m
+}
+
+// HeaderSelectedAction returns the currently selected header action
+// 0=edit, 1=sharing, 2=verify, 3=details
+func (m Model) HeaderSelectedAction() int {
+	return m.headerSelected
+}
+
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -310,14 +357,45 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Header with JID
+	// Header with JID and contact info
 	header := m.jid
 	if header == "" {
 		header = "No chat selected"
 	}
 
-	// Encryption indicator
-	if m.jid != "" {
+	// Build header line 1: Name + status icon + encryption icon + fingerprint
+	if m.jid != "" && m.contactData != nil {
+		// Show contact name if available
+		displayName := m.contactData.Name
+		if displayName == "" {
+			displayName = m.contactData.JID
+		}
+
+		// Status icon
+		var statusIcon string
+		switch m.contactData.Status {
+		case "online":
+			statusIcon = m.styles.PresenceOnline.Render("●")
+		case "away":
+			statusIcon = m.styles.PresenceAway.Render("◐")
+		case "dnd":
+			statusIcon = m.styles.PresenceDND.Render("⊘")
+		case "xa":
+			statusIcon = m.styles.PresenceXA.Render("◯")
+		default:
+			statusIcon = m.styles.PresenceOffline.Render("○")
+		}
+
+		header = fmt.Sprintf("%s %s", statusIcon, displayName)
+
+		// Encryption indicator
+		if m.encrypted {
+			header += " " + m.styles.ChatEncrypted.Render("🔒")
+		} else {
+			header += " " + m.styles.ChatUnencrypted.Render("🔓")
+		}
+	} else if m.jid != "" {
+		// Encryption indicator (fallback when no contact data)
 		if m.encrypted {
 			header += " " + m.styles.ChatEncrypted.Render("🔒")
 		} else {
@@ -327,11 +405,34 @@ func (m Model) View() string {
 
 	b.WriteString(m.styles.ChatNick.Render(header))
 	b.WriteString("\n")
+
+	// Header line 2: Action buttons (when focused)
+	if m.headerFocused && m.jid != "" {
+		actions := []string{"[E]dit", "[S]haring", "[V]erify", "[D]etails"}
+		var actionLine strings.Builder
+		actionLine.WriteString("  ")
+		for i, action := range actions {
+			if i == m.headerSelected {
+				actionLine.WriteString(m.styles.RosterSelected.Render(action))
+			} else {
+				actionLine.WriteString(m.styles.ChatSystem.Render(action))
+			}
+			if i < len(actions)-1 {
+				actionLine.WriteString("  ")
+			}
+		}
+		b.WriteString(actionLine.String())
+		b.WriteString("\n")
+	}
+
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
 
 	// Calculate visible area
 	visibleHeight := m.height - 4 // header + separator + typing indicator
+	if m.headerFocused && m.jid != "" {
+		visibleHeight-- // Account for action buttons line
+	}
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
@@ -490,6 +591,21 @@ func (m Model) InputView() string {
 	return m.styles.CommandInput.Width(m.width).Render(input)
 }
 
+// formatFingerprint formats a fingerprint for display (in 4-char chunks)
+func formatFingerprint(fp string) string {
+	if len(fp) == 0 {
+		return ""
+	}
+	var result strings.Builder
+	for i, c := range fp {
+		if i > 0 && i%4 == 0 {
+			result.WriteString(" ")
+		}
+		result.WriteRune(c)
+	}
+	return result.String()
+}
+
 // wordWrap wraps text to the specified width
 func wordWrap(text string, width int) []string {
 	if width <= 0 {
@@ -520,4 +636,426 @@ func wordWrap(text string, width int) []string {
 	}
 
 	return lines
+}
+
+// AccountDetailData holds data for rendering account details
+type AccountDetailData struct {
+	JID              string
+	Status           string // online, connecting, failed, offline
+	Server           string
+	Port             int
+	Resource         string
+	OMEMO            bool
+	AutoConnect      bool
+	Session          bool
+	UnreadMsgs       int
+	UnreadChats      int
+	OMEMOFingerprint string // Own OMEMO fingerprint
+	OMEMODeviceID    uint32 // Own device ID
+}
+
+// ContactDetailData holds data for rendering contact details
+type ContactDetailData struct {
+	JID            string
+	Name           string
+	Status         string // online, away, dnd, xa, offline
+	StatusMsg      string
+	Groups         []string
+	Subscription   string
+	MyPresence     string // Your custom presence for this contact (empty = default)
+	MyPresenceMsg  string
+	LastSeen       time.Time
+	StatusSharing  bool   // Whether you share your status with this contact
+	OMEMOEnabled   bool   // Whether OMEMO is enabled for this contact
+	Fingerprints   []FingerprintDisplay
+}
+
+// FingerprintDisplay holds fingerprint info for display
+type FingerprintDisplay struct {
+	DeviceID    uint32
+	Fingerprint string
+	Trust       string // "verified", "trusted", "untrusted", "undecided"
+}
+
+// RenderAccountDetails renders the account details view
+func (m Model) RenderAccountDetails(acc AccountDetailData) string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Header
+	header := "Account Details"
+	b.WriteString(m.styles.ChatNick.Render(header))
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n\n")
+
+	// Status with icon
+	var statusIcon, statusText string
+	switch acc.Status {
+	case "online":
+		statusIcon = m.styles.PresenceOnline.Render("●")
+		statusText = "Online"
+	case "connecting":
+		statusIcon = m.styles.PresenceAway.Render("◐")
+		statusText = "Connecting..."
+	case "disconnecting":
+		statusIcon = m.styles.PresenceAway.Render("◐")
+		statusText = "Disconnecting..."
+	case "failed":
+		statusIcon = m.styles.PresenceDND.Render("✘")
+		statusText = "Connection Failed"
+	default:
+		statusIcon = m.styles.PresenceOffline.Render("○")
+		statusText = "Offline"
+	}
+	b.WriteString(fmt.Sprintf("  Status: %s %s\n", statusIcon, statusText))
+
+	// JID
+	b.WriteString(fmt.Sprintf("  JID: %s\n", acc.JID))
+
+	// Server info
+	if acc.Server != "" {
+		serverStr := acc.Server
+		if acc.Port > 0 && acc.Port != 5222 {
+			serverStr = fmt.Sprintf("%s:%d", acc.Server, acc.Port)
+		}
+		b.WriteString(fmt.Sprintf("  Server: %s\n", serverStr))
+	}
+
+	// Resource
+	if acc.Resource != "" {
+		b.WriteString(fmt.Sprintf("  Resource: %s\n", acc.Resource))
+	}
+
+	b.WriteString("\n")
+
+	// Features
+	omemoStr := "OFF"
+	if acc.OMEMO {
+		omemoStr = m.styles.ChatEncrypted.Render("ON")
+	}
+	b.WriteString(fmt.Sprintf("  OMEMO: %s\n", omemoStr))
+
+	// Show OMEMO fingerprint if available
+	if acc.OMEMO {
+		if acc.OMEMODeviceID > 0 && acc.OMEMOFingerprint != "" {
+			b.WriteString(fmt.Sprintf("  Device ID: %d\n", acc.OMEMODeviceID))
+			fpFormatted := formatFingerprint(acc.OMEMOFingerprint)
+			b.WriteString("  Fingerprint:\n")
+			b.WriteString(fmt.Sprintf("    %s\n", fpFormatted))
+		} else if acc.Status == "online" {
+			b.WriteString(m.styles.ChatSystem.Render("  (OMEMO keys will be generated on first message)") + "\n")
+		} else {
+			b.WriteString(m.styles.ChatSystem.Render("  (Connect to generate OMEMO keys)") + "\n")
+		}
+	}
+
+	autoStr := "OFF"
+	if acc.AutoConnect {
+		autoStr = "ON"
+	}
+	b.WriteString(fmt.Sprintf("  AutoConnect: [%s]\n", autoStr))
+
+	// Account type
+	typeStr := "Saved"
+	if acc.Session {
+		typeStr = "Session (not saved)"
+	}
+	b.WriteString(fmt.Sprintf("  Type: %s\n", typeStr))
+
+	b.WriteString("\n")
+
+	// Unread summary
+	if acc.UnreadMsgs > 0 {
+		unreadStr := fmt.Sprintf("  Unread: %d messages", acc.UnreadMsgs)
+		if acc.UnreadChats > 0 {
+			unreadStr += fmt.Sprintf(" from %d chats", acc.UnreadChats)
+		}
+		b.WriteString(m.styles.RosterUnread.Render(unreadStr) + "\n")
+		b.WriteString("\n")
+	}
+
+	// Calculate remaining height for padding
+	visibleHeight := m.height - 4
+	currentLines := strings.Count(b.String(), "\n")
+	for i := currentLines; i < visibleHeight-3; i++ {
+		b.WriteString("\n")
+	}
+
+	// Actions hint at bottom
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n")
+	b.WriteString(m.styles.ChatSystem.Render("  E=edit  C=connect  D=disconnect  T=toggle auto  X=remove  esc=back"))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// RenderContactDetails renders the contact details view
+func (m Model) RenderContactDetails(contact ContactDetailData) string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Header
+	header := "Contact Details"
+	b.WriteString(m.styles.ChatNick.Render(header))
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n\n")
+
+	// Name and JID
+	if contact.Name != "" && contact.Name != contact.JID {
+		b.WriteString(fmt.Sprintf("  Name: %s\n", contact.Name))
+	}
+	b.WriteString(fmt.Sprintf("  JID: %s\n", contact.JID))
+
+	b.WriteString("\n")
+
+	// Status with icon and friendly text
+	var statusIcon, statusText string
+	switch contact.Status {
+	case "online":
+		statusIcon = m.styles.PresenceOnline.Render("●")
+		statusText = "Online"
+	case "away":
+		statusIcon = m.styles.PresenceAway.Render("◐")
+		statusText = "Away"
+	case "dnd":
+		statusIcon = m.styles.PresenceDND.Render("⊘")
+		statusText = "Do Not Disturb"
+	case "xa":
+		statusIcon = m.styles.PresenceXA.Render("◯")
+		statusText = "Extended Away"
+	default:
+		statusIcon = m.styles.PresenceOffline.Render("○")
+		statusText = "Offline"
+	}
+
+	b.WriteString(fmt.Sprintf("  Status: %s %s\n", statusIcon, statusText))
+
+	// Status message if set
+	if contact.StatusMsg != "" {
+		b.WriteString(fmt.Sprintf("  Message: \"%s\"\n", contact.StatusMsg))
+	}
+
+	// For offline contacts, show last seen or indicate status not shared
+	if contact.Status == "offline" {
+		if !contact.LastSeen.IsZero() {
+			lastSeenStr := contact.LastSeen.Format("2006-01-02 15:04")
+			b.WriteString(fmt.Sprintf("  Last seen: %s\n", lastSeenStr))
+		} else {
+			// Contact is offline and we have no last seen info - status not shared
+			b.WriteString(m.styles.ChatSystem.Render("  (status not shared)") + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+
+	// Groups
+	if len(contact.Groups) > 0 {
+		b.WriteString(fmt.Sprintf("  Groups: %s\n", strings.Join(contact.Groups, ", ")))
+	} else {
+		b.WriteString("  Groups: (none)\n")
+	}
+
+	// Subscription
+	if contact.Subscription != "" {
+		b.WriteString(fmt.Sprintf("  Subscription: %s\n", contact.Subscription))
+	}
+
+	b.WriteString("\n")
+
+	// Status sharing toggle
+	sharingStr := "[OFF]"
+	if contact.StatusSharing {
+		sharingStr = m.styles.PresenceOnline.Render("[ON]")
+	}
+	b.WriteString(fmt.Sprintf("  Status sharing: %s\n", sharingStr))
+
+	// Your presence for this contact
+	if contact.MyPresence != "" {
+		presenceStr := contact.MyPresence
+		if contact.MyPresenceMsg != "" {
+			presenceStr += ": " + contact.MyPresenceMsg
+		}
+		b.WriteString(fmt.Sprintf("  Your presence for this contact: [%s]\n", presenceStr))
+	} else {
+		b.WriteString("  Your presence for this contact: [default]\n")
+	}
+
+	b.WriteString("\n")
+
+	// Encryption section
+	b.WriteString("  ── Encryption ──\n")
+	if contact.OMEMOEnabled {
+		b.WriteString("  OMEMO: " + m.styles.ChatEncrypted.Render("Enabled") + "\n")
+	} else {
+		b.WriteString("  OMEMO: Disabled\n")
+	}
+
+	// Fingerprints
+	if len(contact.Fingerprints) > 0 {
+		b.WriteString("  Devices:\n")
+		for _, fp := range contact.Fingerprints {
+			trustStr := fp.Trust
+			switch fp.Trust {
+			case "verified":
+				trustStr = m.styles.PresenceOnline.Render("[verified]")
+			case "trusted":
+				trustStr = m.styles.PresenceAway.Render("[trusted]")
+			case "untrusted":
+				trustStr = m.styles.PresenceDND.Render("[untrusted]")
+			default:
+				trustStr = "[undecided]"
+			}
+			b.WriteString(fmt.Sprintf("    Device %d: %s\n", fp.DeviceID, trustStr))
+			// Show fingerprint in chunks
+			fpFormatted := formatFingerprint(fp.Fingerprint)
+			b.WriteString(fmt.Sprintf("      %s\n", fpFormatted))
+		}
+	}
+
+	// Calculate remaining height for padding
+	visibleHeight := m.height - 4
+	currentLines := strings.Count(b.String(), "\n")
+	for i := currentLines; i < visibleHeight-3; i++ {
+		b.WriteString("\n")
+	}
+
+	// Actions hint at bottom
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n")
+	b.WriteString(m.styles.ChatSystem.Render("  E=edit  enter=chat  s=toggle sharing  v=verify  esc=back"))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// AccountEditData holds data for editing an account
+type AccountEditData struct {
+	JID           string
+	Server        string
+	Port          int
+	Resource      string
+	AutoConnect   bool
+	OMEMO         bool
+	SelectedField int    // 0=server, 1=port, 2=resource, 3=autoconnect, 4=omemo
+	EditingField  bool   // true when actively editing a text field
+	EditBuffer    string // current edit buffer for text fields
+	CursorPos     int    // cursor position in edit buffer
+}
+
+// RenderAccountEdit renders the account edit view
+func (m Model) RenderAccountEdit(edit AccountEditData) string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Header
+	header := "Edit Account"
+	b.WriteString(m.styles.ChatNick.Render(header))
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n\n")
+
+	// JID (read-only)
+	b.WriteString(fmt.Sprintf("  JID: %s (read-only)\n\n", edit.JID))
+
+	// Editable fields
+	fields := []struct {
+		label string
+		value string
+		idx   int
+	}{
+		{"Server", edit.Server, 0},
+		{"Port", fmt.Sprintf("%d", edit.Port), 1},
+		{"Resource", edit.Resource, 2},
+	}
+
+	for _, field := range fields {
+		prefix := "  "
+		if edit.SelectedField == field.idx {
+			prefix = "> "
+		}
+
+		if edit.SelectedField == field.idx && edit.EditingField {
+			// Show edit buffer with cursor
+			beforeCursor := edit.EditBuffer[:edit.CursorPos]
+			afterCursor := ""
+			cursorChar := " "
+			if edit.CursorPos < len(edit.EditBuffer) {
+				cursorChar = string(edit.EditBuffer[edit.CursorPos])
+				afterCursor = edit.EditBuffer[edit.CursorPos+1:]
+			}
+			cursor := lipgloss.NewStyle().Reverse(true).Render(cursorChar)
+			b.WriteString(fmt.Sprintf("%s%s: %s%s%s\n", prefix, field.label, beforeCursor, cursor, afterCursor))
+		} else {
+			value := field.value
+			if value == "" {
+				value = "(empty)"
+			}
+			if edit.SelectedField == field.idx {
+				b.WriteString(m.styles.RosterSelected.Render(fmt.Sprintf("%s%s: %s", prefix, field.label, value)) + "\n")
+			} else {
+				b.WriteString(fmt.Sprintf("%s%s: %s\n", prefix, field.label, value))
+			}
+		}
+	}
+
+	b.WriteString("\n")
+
+	// Toggle fields
+	toggleFields := []struct {
+		label string
+		value bool
+		idx   int
+	}{
+		{"AutoConnect", edit.AutoConnect, 3},
+		{"OMEMO", edit.OMEMO, 4},
+	}
+
+	for _, field := range toggleFields {
+		prefix := "  "
+		if edit.SelectedField == field.idx {
+			prefix = "> "
+		}
+
+		valueStr := "[OFF]"
+		if field.value {
+			valueStr = "[ON]"
+		}
+
+		if edit.SelectedField == field.idx {
+			b.WriteString(m.styles.RosterSelected.Render(fmt.Sprintf("%s%s: %s", prefix, field.label, valueStr)) + "\n")
+		} else {
+			b.WriteString(fmt.Sprintf("%s%s: %s\n", prefix, field.label, valueStr))
+		}
+	}
+
+	// Calculate remaining height for padding
+	visibleHeight := m.height - 4
+	currentLines := strings.Count(b.String(), "\n")
+	for i := currentLines; i < visibleHeight-4; i++ {
+		b.WriteString("\n")
+	}
+
+	// Actions hint at bottom
+	b.WriteString(strings.Repeat("─", m.width-2))
+	b.WriteString("\n")
+	if edit.EditingField {
+		b.WriteString(m.styles.ChatSystem.Render("  enter=save field  esc=cancel field"))
+	} else {
+		b.WriteString(m.styles.ChatSystem.Render("  j/k=navigate  enter=edit/toggle  S=save all  esc=cancel"))
+	}
+	b.WriteString("\n")
+
+	return b.String()
 }

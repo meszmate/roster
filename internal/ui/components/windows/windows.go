@@ -235,6 +235,22 @@ func (m Model) GetWindows() []Window {
 	return m.windows
 }
 
+// SetAccountForActive sets the account for the active window
+func (m Model) SetAccountForActive(accountJID string) Model {
+	if m.active >= 0 && m.active < len(m.windows) {
+		m.windows[m.active].AccountJID = accountJID
+	}
+	return m
+}
+
+// GetActiveAccountJID returns the account JID of the active window
+func (m Model) GetActiveAccountJID() string {
+	if m.active >= 0 && m.active < len(m.windows) {
+		return m.windows[m.active].AccountJID
+	}
+	return ""
+}
+
 // View renders the window list (for tab bar)
 func (m Model) View() string {
 	// This could render a tab bar at the top

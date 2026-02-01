@@ -154,6 +154,25 @@ const (
 	ActionAccountDisconnect
 	ActionAccountRemove
 	ActionAccountEdit
+
+	// Detail view actions
+	ActionShowDetails
+	ActionToggleAutoConnect
+
+	// Multi-account window binding
+	ActionSetWindowAccount
+
+	// MUC room creation
+	ActionCreateRoom
+
+	// Status sharing
+	ActionToggleStatusSharing
+
+	// Fingerprint verification
+	ActionVerifyFingerprint
+
+	// Chat header focus
+	ActionFocusHeader
 )
 
 // KeyBinding represents a key binding
@@ -279,7 +298,8 @@ func (m *Manager) setupDefaultBindings() {
 		"gi":       ActionShowInfo,      // 'g' prefix + 'i' for info
 
 		// MUC (avoiding ctrl conflicts for tmux)
-		"gj":       ActionJoinRoom,        // 'g' prefix + 'j' for join
+		"gj":       ActionJoinRoom,         // 'g' prefix + 'j' for join
+		"gC":       ActionCreateRoom,       // 'g' prefix + 'C' for create room
 		"gp":       ActionShowParticipants, // 'g' prefix + 'p' for participants
 
 		// Settings
@@ -303,6 +323,19 @@ func (m *Manager) setupDefaultBindings() {
 		"D":        ActionAccountDisconnect, // Disconnect selected account
 		"X":        ActionAccountRemove,     // Remove selected account (with confirmation)
 		"E":        ActionAccountEdit,       // Edit selected account
+		"T":        ActionToggleAutoConnect, // Toggle auto-connect for selected account
+
+		// Multi-account window binding
+		"space":    ActionSetWindowAccount,  // Bind selected account to current window
+
+		// Status sharing (in contact details)
+		"s":        ActionToggleStatusSharing, // Toggle status sharing for contact
+
+		// Fingerprint verification (in contact details)
+		"v":        ActionVerifyFingerprint,   // Verify fingerprint
+
+		// Chat header focus
+		"gh":       ActionFocusHeader,         // Focus chat header for contact actions
 	}
 
 	// Insert mode bindings
