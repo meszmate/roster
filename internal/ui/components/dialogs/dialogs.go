@@ -170,7 +170,7 @@ func (m Model) ShowConfirm(title, message string) Model {
 // ShowAddContact shows the add contact dialog
 func (m Model) ShowAddContact() Model {
 	m.dialogType = DialogAddContact
-	m.title = "Add Contact"
+	m.title = "Add to Roster"
 	m.message = ""
 	m.inputs = []DialogInput{
 		{Label: "JID", Key: "jid", Value: ""},
@@ -206,7 +206,7 @@ func (m Model) ShowJoinRoom() Model {
 // ShowContactInfo shows contact info dialog
 func (m Model) ShowContactInfo(jid string) Model {
 	m.dialogType = DialogContactInfo
-	m.title = "Contact Info"
+	m.title = "Roster Info"
 	m.message = jid
 	m.buttons = []string{"Close"}
 	m.activeBtn = 0
@@ -270,14 +270,14 @@ func (m Model) ShowHelp(commands map[string]string) Model {
 	sb.WriteString("  E         Edit account\n")
 	sb.WriteString("  X         Remove account\n")
 	sb.WriteString("\nActions (g prefix):\n")
-	sb.WriteString("  ga        Add contact\n")
-	sb.WriteString("  gx        Remove contact\n")
-	sb.WriteString("  gR        Rename contact\n")
+	sb.WriteString("  ga        Add to roster\n")
+	sb.WriteString("  gx        Remove from roster\n")
+	sb.WriteString("  gR        Rename roster entry\n")
 	sb.WriteString("  gj        Join room\n")
 	sb.WriteString("  gC        Create room\n")
 	sb.WriteString("  gs/S      Settings\n")
 	sb.WriteString("  gw        Save windows\n")
-	sb.WriteString("\nContact Details:\n")
+	sb.WriteString("\nRoster Details:\n")
 	sb.WriteString("  s         Toggle status sharing\n")
 	sb.WriteString("  v         Verify fingerprint\n")
 	sb.WriteString("  Space     Bind account to window\n")
@@ -583,34 +583,36 @@ func (m Model) ShowRegisterForm(server string, port int, fields []RegistrationFi
 	// Separate visible fields from hidden fields
 	var visibleInputs []DialogInput
 
-	// Add read-only CAPTCHA viewer field if media CAPTCHA is present
-	if captcha != nil && (captcha.Type == "image" || captcha.Type == "audio" || captcha.Type == "video") {
-		label := "Open CAPTCHA"
-		switch captcha.Type {
-		case "audio":
-			label = "Play Audio"
-		case "video":
-			label = "Play Video"
-		}
-		// Show available actions based on what's available
+	// Add read-only CAPTCHA viewer field if CAPTCHA has URL or media data
+	if captcha != nil {
 		hasURL := captcha.URL != "" && !strings.HasPrefix(captcha.URL, "cid:")
 		hasData := len(captcha.Data) > 0
-		var value string
-		if hasURL && hasData {
-			value = "[ V: Open | C: Copy URL ]"
-		} else if hasURL {
-			value = "[ V: Open | C: Copy URL ]"
-		} else if hasData {
-			value = "[ V: Open ]"
-		} else {
-			value = "[ V: Open ]"
+		isMediaType := captcha.Type == "image" || captcha.Type == "audio" || captcha.Type == "video"
+
+		// Show viewer field if we have something to open/copy
+		if hasURL || hasData || isMediaType {
+			label := "Open CAPTCHA"
+			switch captcha.Type {
+			case "audio":
+				label = "Play Audio"
+			case "video":
+				label = "Play Video"
+			}
+			var value string
+			if hasURL {
+				value = "[ V: Open | C: Copy URL ]"
+			} else if hasData {
+				value = "[ V: Open ]"
+			} else {
+				value = "[ V: Open ]"
+			}
+			visibleInputs = append(visibleInputs, DialogInput{
+				Label:    label,
+				Key:      "_captcha_viewer",
+				Value:    value,
+				ReadOnly: true,
+			})
 		}
-		visibleInputs = append(visibleInputs, DialogInput{
-			Label:    label,
-			Key:      "_captcha_viewer",
-			Value:    value,
-			ReadOnly: true,
-		})
 	}
 
 	for _, f := range fields {
@@ -684,11 +686,11 @@ func (m Model) ShowRegisterForm(server string, port int, fields []RegistrationFi
 func (m Model) ShowRegisterSuccess(jid, password, server string, port int) Model {
 	m.dialogType = DialogRegisterSuccess
 	m.title = "Registration Successful"
-	m.message = "Account created: " + jid
+	m.message = "Account created: " + jid + "\n\n[1] Save & Connect  [2] Save Only\n[3] Session Only    [4] Close"
 	m.inputs = nil
 	m.checkboxes = nil
 	m.inCheckboxes = false
-	m.buttons = []string{"Save & Connect", "Save Only", "Close"}
+	m.buttons = []string{"Save & Connect", "Save Only", "Session Only", "Close"}
 	m.activeBtn = 0
 	m.data["jid"] = jid
 	m.data["password"] = password
@@ -954,11 +956,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// Handle 'V' (uppercase) key for viewing CAPTCHA in registration form
+		// Handle 'v' key for viewing CAPTCHA in registration form
 		// Only trigger when focused on the read-only CAPTCHA viewer field
-		captchaType := m.data["_captchaType"]
-		isMediaCaptcha := captchaType == "image" || captchaType == "audio" || captchaType == "video"
-		if msg.String() == "V" && m.dialogType == DialogRegisterForm && isMediaCaptcha {
+		keyStr := strings.ToLower(msg.String())
+		if keyStr == "v" && m.dialogType == DialogRegisterForm {
 			// Check if current input is the CAPTCHA viewer field
 			if m.activeInput >= 0 && m.activeInput < len(m.inputs) {
 				if m.inputs[m.activeInput].Key == "_captcha_viewer" {
@@ -982,9 +983,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
-		// Handle 'C' (uppercase) key for copying CAPTCHA URL to clipboard
+		// Handle 'c' key for copying CAPTCHA URL to clipboard
 		// Only when focused on the CAPTCHA viewer field
-		if msg.String() == "C" && m.dialogType == DialogRegisterForm {
+		if keyStr == "c" && m.dialogType == DialogRegisterForm {
 			if m.activeInput >= 0 && m.activeInput < len(m.inputs) {
 				if m.inputs[m.activeInput].Key == "_captcha_viewer" {
 					captchaURL := m.data["_captchaURL"]
@@ -1050,6 +1051,45 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.scrollOffset = 0
 				}
 				return m, nil
+			}
+		}
+
+		// Handle number keys 1-9 for button selection (when not in input fields)
+		if len(m.inputs) == 0 || m.dialogType == DialogRegisterSuccess {
+			if keyStr >= "1" && keyStr <= "9" {
+				btnIndex := int(keyStr[0] - '1') // Convert "1" to 0, "2" to 1, etc.
+				if btnIndex < len(m.buttons) {
+					m.activeBtn = btnIndex
+					// Trigger the button action
+					values := make(map[string]string)
+					for _, input := range m.inputs {
+						values[input.Key] = input.Value
+					}
+					for _, cb := range m.checkboxes {
+						if cb.Checked {
+							values[cb.Key] = "true"
+						} else {
+							values[cb.Key] = "false"
+						}
+					}
+					for k, v := range m.data {
+						values[k] = v
+					}
+					confirmed := btnIndex == 0
+					action := ActionCancel
+					if confirmed {
+						action = ActionConfirm
+					}
+					result := DialogResult{
+						Type:      m.dialogType,
+						Confirmed: confirmed,
+						Button:    btnIndex,
+						Action:    action,
+						Values:    values,
+					}
+					m = m.Hide()
+					return m, func() tea.Msg { return result }
+				}
 			}
 		}
 

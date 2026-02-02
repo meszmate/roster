@@ -803,7 +803,7 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	var b strings.Builder
 
 	// Header
-	header := "Contact Details"
+	header := "Roster Details"
 	b.WriteString(m.styles.ChatNick.Render(header))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", m.width-2))
@@ -878,15 +878,15 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	}
 	b.WriteString(fmt.Sprintf("  Status sharing: %s\n", sharingStr))
 
-	// Your presence for this contact
+	// Your presence for this roster entry
 	if contact.MyPresence != "" {
 		presenceStr := contact.MyPresence
 		if contact.MyPresenceMsg != "" {
 			presenceStr += ": " + contact.MyPresenceMsg
 		}
-		b.WriteString(fmt.Sprintf("  Your presence for this contact: [%s]\n", presenceStr))
+		b.WriteString(fmt.Sprintf("  Your presence for this roster entry: [%s]\n", presenceStr))
 	} else {
-		b.WriteString("  Your presence for this contact: [default]\n")
+		b.WriteString("  Your presence for this roster entry: [default]\n")
 	}
 
 	b.WriteString("\n")

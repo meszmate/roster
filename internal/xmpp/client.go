@@ -14,7 +14,6 @@ import (
 	"mellium.im/sasl"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
-	"mellium.im/xmpp/roster"
 	"mellium.im/xmpp/stanza"
 )
 
@@ -312,7 +311,124 @@ func (c *Client) handlePresenceStanza(session *xmpp.Session, start xml.StartElem
 
 // handleIQ processes an IQ stanza
 func (c *Client) handleIQ(session *xmpp.Session, start xml.StartElement) {
-	// IQ handling would go here
+	// Decode IQ attributes
+	var iqType, iqID string
+	for _, attr := range start.Attr {
+		switch attr.Name.Local {
+		case "type":
+			iqType = attr.Value
+		case "id":
+			iqID = attr.Value
+		}
+	}
+
+	// Read tokens from the session's TokenReader
+	tokenReader := session.TokenReader()
+	for {
+		tok, err := tokenReader.Token()
+		if err != nil {
+			return
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "query" && t.Name.Space == "jabber:iq:roster" {
+				items := c.parseRosterQuery(tokenReader, t)
+				if c.onRoster != nil && len(items) > 0 {
+					c.onRoster(items)
+				}
+				// Send result acknowledgment for roster pushes
+				if iqType == "set" && iqID != "" {
+					c.sendIQResult(iqID)
+				}
+				return
+			}
+		case xml.EndElement:
+			if t.Name.Local == "iq" {
+				return
+			}
+		}
+	}
+}
+
+// tokenReader is an interface for reading XML tokens
+type tokenReader interface {
+	Token() (xml.Token, error)
+}
+
+// parseRosterQuery parses a roster query element
+func (c *Client) parseRosterQuery(tr tokenReader, start xml.StartElement) []RosterItem {
+	var items []RosterItem
+	for {
+		tok, err := tr.Token()
+		if err != nil {
+			return items
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "item" {
+				item := c.parseRosterItem(tr, t)
+				items = append(items, item)
+			}
+		case xml.EndElement:
+			if t.Name.Local == "query" {
+				return items
+			}
+		}
+	}
+}
+
+// parseRosterItem parses a roster item element
+func (c *Client) parseRosterItem(tr tokenReader, start xml.StartElement) RosterItem {
+	item := RosterItem{}
+	for _, attr := range start.Attr {
+		switch attr.Name.Local {
+		case "jid":
+			item.JID, _ = jid.Parse(attr.Value)
+		case "name":
+			item.Name = attr.Value
+		case "subscription":
+			item.Subscription = attr.Value
+		}
+	}
+	// Parse group elements
+	for {
+		tok, err := tr.Token()
+		if err != nil {
+			return item
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "group" {
+				if groupTok, err := tr.Token(); err == nil && groupTok != nil {
+					if charData, ok := groupTok.(xml.CharData); ok {
+						item.Groups = append(item.Groups, string(charData))
+					}
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "item" {
+				return item
+			}
+		}
+	}
+}
+
+// sendIQResult sends an IQ result acknowledgment
+func (c *Client) sendIQResult(id string) {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	iq := stanza.IQ{
+		ID:   id,
+		Type: stanza.ResultIQ,
+	}
+	session.Encode(c.ctx, iq)
 }
 
 // handleDisconnect handles unexpected disconnection
@@ -424,14 +540,51 @@ func (c *Client) RequestRoster() error {
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
+	session := c.session
 	c.mu.RUnlock()
 
-	// Roster request would be implemented here
-	// Using mellium.im/xmpp/roster package
-	return nil
+	// Build roster get IQ
+	type rosterGetQuery struct {
+		XMLName xml.Name `xml:"jabber:iq:roster query"`
+	}
+	type rosterGetIQ struct {
+		stanza.IQ
+		Query rosterGetQuery
+	}
+
+	iq := rosterGetIQ{
+		IQ: stanza.IQ{
+			Type: stanza.GetIQ,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	return session.Encode(ctx, iq)
 }
 
-// AddContact adds a contact to the roster
+// rosterQuery represents a roster query for XML encoding
+type rosterQuery struct {
+	XMLName xml.Name    `xml:"jabber:iq:roster query"`
+	Item    rosterItem  `xml:"item"`
+}
+
+// rosterItem represents a roster item for XML encoding
+type rosterItem struct {
+	JID          string   `xml:"jid,attr"`
+	Name         string   `xml:"name,attr,omitempty"`
+	Subscription string   `xml:"subscription,attr,omitempty"`
+	Group        []string `xml:"group,omitempty"`
+}
+
+// rosterIQ represents a roster IQ stanza
+type rosterIQ struct {
+	stanza.IQ
+	Query rosterQuery `xml:"jabber:iq:roster query"`
+}
+
+// AddContact adds a contact to the roster (fire-and-forget)
 func (c *Client) AddContact(contactJID, name string, groups []string) error {
 	c.mu.RLock()
 	if !c.connected {
@@ -446,16 +599,29 @@ func (c *Client) AddContact(contactJID, name string, groups []string) error {
 		return fmt.Errorf("invalid JID: %w", err)
 	}
 
-	item := roster.Item{
-		JID:   toJID.Bare(),
-		Name:  name,
-		Group: groups,
+	// Build roster IQ stanza directly - fire and forget
+	// According to RFC 6121, roster set is fire-and-forget; server sends roster push asynchronously
+	iq := rosterIQ{
+		IQ: stanza.IQ{
+			Type: stanza.SetIQ,
+		},
+		Query: rosterQuery{
+			Item: rosterItem{
+				JID:   toJID.Bare().String(),
+				Name:  name,
+				Group: groups,
+			},
+		},
 	}
 
-	return roster.Set(c.ctx, session, item)
+	// Use a short timeout - we're just sending, not waiting for response
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+
+	return session.Encode(ctx, iq)
 }
 
-// RemoveContact removes a contact from the roster
+// RemoveContact removes a contact from the roster (fire-and-forget)
 func (c *Client) RemoveContact(contactJID string) error {
 	c.mu.RLock()
 	if !c.connected {
@@ -470,13 +636,24 @@ func (c *Client) RemoveContact(contactJID string) error {
 		return fmt.Errorf("invalid JID: %w", err)
 	}
 
-	// Set subscription to "remove" to delete from roster
-	item := roster.Item{
-		JID:          toJID.Bare(),
-		Subscription: "remove",
+	// Build roster IQ stanza with subscription="remove" - fire and forget
+	iq := rosterIQ{
+		IQ: stanza.IQ{
+			Type: stanza.SetIQ,
+		},
+		Query: rosterQuery{
+			Item: rosterItem{
+				JID:          toJID.Bare().String(),
+				Subscription: "remove",
+			},
+		},
 	}
 
-	return roster.Set(c.ctx, session, item)
+	// Use a short timeout - we're just sending, not waiting for response
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+
+	return session.Encode(ctx, iq)
 }
 
 // Subscribe sends a subscription request
@@ -499,7 +676,11 @@ func (c *Client) Subscribe(contactJID string) error {
 		Type: stanza.SubscribePresence,
 	}
 
-	return session.Encode(c.ctx, p)
+	// Use a timeout context for the operation
+	ctx, cancel := context.WithTimeout(c.ctx, 15*time.Second)
+	defer cancel()
+
+	return session.Encode(ctx, p)
 }
 
 // Unsubscribe sends an unsubscribe request

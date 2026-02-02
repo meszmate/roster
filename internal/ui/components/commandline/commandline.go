@@ -73,10 +73,10 @@ func (m *Model) registerDefaultCommands() {
 		{Name: "settings", Description: "Open settings menu", Args: []string{}},
 
 		// Contacts
-		{Name: "add", Description: "Add a contact to roster", Args: []string{"jid", "[name]"}},
-		{Name: "remove", Description: "Remove a contact from roster", Args: []string{"jid"}},
-		{Name: "rename", Description: "Rename a contact", Args: []string{"jid", "name"}},
-		{Name: "info", Description: "Show contact info", Args: []string{"[jid]"}},
+		{Name: "add", Description: "Add to roster", Args: []string{"jid", "[name]"}},
+		{Name: "remove", Description: "Remove from roster", Args: []string{"jid"}},
+		{Name: "rename", Description: "Rename roster entry", Args: []string{"jid", "name"}},
+		{Name: "info", Description: "Show roster info", Args: []string{"[jid]"}},
 		{Name: "roster", Description: "Toggle roster panel visibility", Args: []string{}},
 
 		// Messaging
@@ -106,7 +106,7 @@ func (m *Model) registerDefaultCommands() {
 
 		// Encryption
 		{Name: "omemo", Description: "OMEMO encryption: status, enable, disable, fingerprints", Args: []string{"subcommand", "[args...]"}},
-		{Name: "fingerprint", Description: "Show OMEMO fingerprints for a contact", Args: []string{"[jid]"}},
+		{Name: "fingerprint", Description: "Show OMEMO fingerprints for roster entry", Args: []string{"[jid]"}},
 		{Name: "trust", Description: "Trust an OMEMO fingerprint", Args: []string{"jid", "fingerprint"}},
 		{Name: "untrust", Description: "Untrust an OMEMO fingerprint", Args: []string{"jid", "fingerprint"}},
 

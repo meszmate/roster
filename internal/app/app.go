@@ -175,7 +175,7 @@ type App struct {
 	currentAccount string
 	status         string
 	statusMsg      string
-	contacts       []roster.Contact
+	rosters        []roster.Roster
 	chatHistory    map[string][]chat.Message
 
 	// Multi-account state
@@ -249,26 +249,44 @@ func (a *App) listenForEvents() tea.Cmd {
 
 // autoConnect auto-connects to accounts if configured
 func (a *App) autoConnect() tea.Cmd {
-	return func() tea.Msg {
-		if !a.cfg.General.AutoConnect {
-			return nil
-		}
-
-		for _, account := range a.accounts.Accounts {
-			if account.AutoConnect && account.Password != "" {
-				// Set current account and trigger connection
-				a.currentAccount = account.JID
-				a.mu.Lock()
-				a.status = "connecting"
-				a.accountStatuses[account.JID] = "connecting"
-				a.mu.Unlock()
-				// Return ConnectingMsg to trigger actual connection
-				return ConnectingMsg{JID: account.JID}
-			}
-		}
-
+	if !a.cfg.General.AutoConnect {
 		return nil
 	}
+
+	// Collect all accounts that need auto-connect
+	var cmds []tea.Cmd
+	var firstAccount string
+
+	for _, account := range a.accounts.Accounts {
+		if account.AutoConnect && account.Password != "" {
+			jid := account.JID
+			if firstAccount == "" {
+				firstAccount = jid
+			}
+
+			// Create a command for each account
+			cmds = append(cmds, func() tea.Msg {
+				a.mu.Lock()
+				a.accountStatuses[jid] = "connecting"
+				a.mu.Unlock()
+				return ConnectingMsg{JID: jid}
+			})
+		}
+	}
+
+	// Set the first auto-connect account as current
+	if firstAccount != "" {
+		a.currentAccount = firstAccount
+		a.mu.Lock()
+		a.status = "connecting"
+		a.mu.Unlock()
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+
+	return tea.Batch(cmds...)
 }
 
 // sendEvent sends an event to the UI
@@ -354,32 +372,42 @@ func (a *App) SetStatusAndSend(status, statusMsg string) error {
 	return client.SendPresence(show, statusMsg)
 }
 
-// GetContacts returns the roster contacts
-func (a *App) GetContacts() []roster.Contact {
+// GetContacts returns the roster entries (alias for GetRosters for compatibility)
+func (a *App) GetContacts() []roster.Roster {
+	return a.GetRosters()
+}
+
+// GetRosters returns the roster entries
+func (a *App) GetRosters() []roster.Roster {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.contacts
+	return a.rosters
 }
 
-// GetContactsWithStatusInfo returns contacts enriched with status sharing info
-func (a *App) GetContactsWithStatusInfo() []roster.Contact {
+// GetContactsWithStatusInfo returns roster entries enriched with status sharing info
+func (a *App) GetContactsWithStatusInfo() []roster.Roster {
 	a.mu.RLock()
-	contacts := make([]roster.Contact, len(a.contacts))
-	copy(contacts, a.contacts)
+	rosters := make([]roster.Roster, len(a.rosters))
+	copy(rosters, a.rosters)
 	a.mu.RUnlock()
 
-	// Enrich each contact with status sharing info
-	for i := range contacts {
-		contacts[i].StatusHidden = !a.IsStatusSharingEnabled(contacts[i].JID)
+	// Enrich each roster entry with status sharing info
+	for i := range rosters {
+		rosters[i].StatusHidden = !a.IsStatusSharingEnabled(rosters[i].JID)
 	}
 
-	return contacts
+	return rosters
 }
 
-// SetContacts sets the roster contacts
-func (a *App) SetContacts(contacts []roster.Contact) {
+// SetContacts sets the roster entries (alias for SetRosters for compatibility)
+func (a *App) SetContacts(rosters []roster.Roster) {
+	a.SetRosters(rosters)
+}
+
+// SetRosters sets the roster entries
+func (a *App) SetRosters(rosters []roster.Roster) {
 	a.mu.Lock()
-	a.contacts = contacts
+	a.rosters = rosters
 	a.mu.Unlock()
 
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
@@ -1088,6 +1116,70 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.IncrementContactUnread(jidStr, contactJID)
 		})
 
+		// Set up roster handler
+		accountJID := jidStr // Capture for closure
+		client.SetRosterHandler(func(items []xmpp.RosterItem) {
+			a.mu.Lock()
+
+			// Debug: log how many items we received and how many we have
+			fmt.Printf("[DEBUG] SetRosterHandler called with %d items, existing rosters: %d\n", len(items), len(a.rosters))
+
+			// Build map of existing rosters for this account: JID -> index
+			existingByJID := make(map[string]int)
+			for i, r := range a.rosters {
+				if r.AccountJID == accountJID {
+					existingByJID[r.JID] = i
+				}
+			}
+
+			for _, item := range items {
+				itemJID := item.JID.Bare().String()
+
+				if item.Subscription == "remove" {
+					// Remove from roster
+					if idx, exists := existingByJID[itemJID]; exists {
+						a.rosters = append(a.rosters[:idx], a.rosters[idx+1:]...)
+						// Update indices for entries after the removed one
+						for jid, i := range existingByJID {
+							if i > idx {
+								existingByJID[jid] = i - 1
+							}
+						}
+						delete(existingByJID, itemJID)
+					}
+					continue
+				}
+
+				newEntry := roster.Roster{
+					JID:          itemJID,
+					Name:         item.Name,
+					Groups:       item.Groups,
+					Status:       "offline", // Will be updated by presence
+					AccountJID:   accountJID,
+					Subscription: item.Subscription,
+				}
+
+				if idx, exists := existingByJID[itemJID]; exists {
+					// Update existing entry - preserve Status, StatusMsg, and Unread
+					newEntry.Status = a.rosters[idx].Status
+					newEntry.StatusMsg = a.rosters[idx].StatusMsg
+					newEntry.Unread = a.rosters[idx].Unread
+					a.rosters[idx] = newEntry
+				} else {
+					// Add new entry
+					a.rosters = append(a.rosters, newEntry)
+					existingByJID[itemJID] = len(a.rosters) - 1
+				}
+			}
+
+			// Debug: log final roster count
+			fmt.Printf("[DEBUG] After merge, total rosters: %d\n", len(a.rosters))
+
+			// Unlock before sending event to avoid holding lock during event dispatch
+			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterUpdate})
+		})
+
 		// Attempt to connect
 		if err := client.Connect(); err != nil {
 			a.mu.Lock()
@@ -1125,6 +1217,13 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 			a.AddSessionAccount(acc)
 		}
+
+		// Request roster from server (async - response handled by roster handler)
+		go func() {
+			if err := client.RequestRoster(); err != nil {
+				a.sendEvent(EventMsg{Type: EventError, Data: "Failed to request roster: " + err.Error()})
+			}
+		}()
 
 		return ConnectResultMsg{
 			Success: true,
@@ -1443,19 +1542,19 @@ func (a *App) IsAccountConnected(accountJID string) bool {
 	return false
 }
 
-// GetContactsForAccount returns contacts filtered by account
-func (a *App) GetContactsForAccount(accountJID string) []roster.Contact {
+// GetContactsForAccount returns roster entries filtered by account
+func (a *App) GetContactsForAccount(accountJID string) []roster.Roster {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
 	if accountJID == "" {
-		return a.contacts // Return all if no account specified
+		return a.rosters // Return all if no account specified
 	}
 
-	var filtered []roster.Contact
-	for _, c := range a.contacts {
-		if c.AccountJID == accountJID {
-			filtered = append(filtered, c)
+	var filtered []roster.Roster
+	for _, r := range a.rosters {
+		if r.AccountJID == accountJID {
+			filtered = append(filtered, r)
 		}
 	}
 	return filtered
