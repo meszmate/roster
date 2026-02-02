@@ -173,6 +173,10 @@ const (
 
 	// Chat header focus
 	ActionFocusHeader
+
+	// File handling
+	ActionOpenFileURL
+	ActionCopyFileURL
 )
 
 // KeyBinding represents a key binding
@@ -336,6 +340,10 @@ func (m *Manager) setupDefaultBindings() {
 
 		// Chat header focus
 		"gh":       ActionFocusHeader,         // Focus chat header for contact actions
+
+		// File handling (in chat view)
+		"go":       ActionOpenFileURL,         // Open selected file URL
+		"gO":       ActionCopyFileURL,         // Copy file URL to clipboard
 	}
 
 	// Insert mode bindings

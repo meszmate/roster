@@ -36,6 +36,7 @@ const (
 	DialogRegister
 	DialogRegisterForm
 	DialogRegisterSuccess
+	DialogConfirmSaveMessages
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -163,6 +164,19 @@ func (m Model) ShowConfirm(title, message string) Model {
 	m.message = message
 	m.buttons = []string{"Yes", "No"}
 	m.activeBtn = 0
+	m.inputs = nil
+	return m
+}
+
+// ShowConfirmSaveMessages shows the confirmation dialog for enabling message persistence
+func (m Model) ShowConfirmSaveMessages() Model {
+	m.dialogType = DialogConfirmSaveMessages
+	m.title = "Enable Message Persistence"
+	m.message = "This will save your chat messages to a local SQLite database.\n\n" +
+		"Messages will be stored locally on your device and persist across sessions.\n\n" +
+		"Are you sure you want to enable message saving?"
+	m.buttons = []string{"Enable", "Cancel"}
+	m.activeBtn = 1 // Default to Cancel for safety
 	m.inputs = nil
 	return m
 }
@@ -1314,10 +1328,12 @@ func (m Model) View() string {
 				b.WriteString("\n")
 			}
 
-			// Show visible lines
+			// Show visible lines - render each line separately to preserve colors
 			visibleLines := lines[start:end]
-			b.WriteString(m.styles.DialogContent.Render(strings.Join(visibleLines, "\n")))
-			b.WriteString("\n")
+			for _, line := range visibleLines {
+				b.WriteString(m.styles.DialogContent.Render(line))
+				b.WriteString("\n")
+			}
 
 			// Show "more below" indicator
 			remaining := totalLines - end
@@ -1326,8 +1342,12 @@ func (m Model) View() string {
 			}
 			b.WriteString("\n")
 		} else {
-			b.WriteString(m.styles.DialogContent.Render(m.message))
-			b.WriteString("\n\n")
+			// Render each line separately to preserve colors across line breaks
+			for _, line := range strings.Split(m.message, "\n") {
+				b.WriteString(m.styles.DialogContent.Render(line))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
 		}
 	}
 

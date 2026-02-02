@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -204,6 +203,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focus = FocusChat
 		m.keys.SetMode(keybindings.ModeInsert)
 
+	case chat.SendMsg:
+		// User wants to send a message
+		if msg.To != "" && msg.Body != "" {
+			cmds = append(cmds, m.app.SendChatMessage(msg.To, msg.Body))
+			// Start spinner animation
+			cmds = append(cmds, chat.SpinnerTick())
+		}
+
+	case chat.SpinnerTickMsg:
+		// Forward spinner tick to chat for message status animation
+		var cmd tea.Cmd
+		m.chat, cmd = m.chat.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case app.SendMessageResultMsg:
+		// Handle message send result
+		if !msg.Success {
+			m.chat = m.chat.SetStatusMsg("Failed to send: " + msg.Error)
+		}
+
+	case app.MessageStatusUpdateMsg:
+		// Update message status in chat (delivery/read receipt)
+		m.chat = m.chat.UpdateMessageStatus(msg.MessageID, chat.MessageStatus(msg.Status))
+
 	case commandline.CommandMsg:
 		// Command executed
 		cmds = append(cmds, m.executeCommand(msg.Command, msg.Args))
@@ -289,8 +314,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.chat = m.chat.SetStatusMsg("Added to roster: " + displayName)
 			m.focus = FocusRoster
-			// Trigger roster refresh
+			// Trigger roster refresh from server
 			cmds = append(cmds, m.app.RequestRosterRefresh())
+			// Immediately refresh roster from local state (optimistic update)
+			m.roster = m.roster.SetContacts(m.app.GetContacts())
 		} else {
 			m.dialog = m.dialog.ShowError("Failed to add to roster: " + msg.Error)
 			m.focus = FocusDialog
@@ -308,6 +335,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dialog = dialogs.New(styles)
 			m.updateComponentSizes()
 		}
+
+	case settings.ConfirmSaveMessagesMsg:
+		// User wants to enable message saving - show confirmation dialog
+		m.dialog = m.dialog.ShowConfirmSaveMessages()
+		m.focus = FocusDialog
 
 	case app.RegisterFormMsg:
 		if msg.Error != "" {
@@ -682,6 +714,12 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 
 	case keybindings.ActionAddContact:
+		// Require an account to be selected before adding contacts
+		if m.app.CurrentAccount() == "" {
+			m.dialog = m.dialog.ShowError("Select an account first to add contacts.")
+			m.focus = FocusDialog
+			return nil
+		}
 		m.dialog = m.dialog.ShowAddContact()
 		m.focus = FocusDialog
 
@@ -708,6 +746,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 
 	case keybindings.ActionSaveWindows:
 		m.saveWindows()
+
+	case keybindings.ActionRefresh:
+		// Refresh roster from server
+		m.roster = m.roster.SetContacts(m.app.GetContacts())
+		m.roster = m.roster.SetAccounts(m.getAccountDisplays())
+		m.chat = m.chat.SetStatusMsg("Refreshing roster...")
+		return m.app.RequestRosterRefresh()
 
 	case keybindings.ActionFocusAccounts:
 		m.focus = FocusAccounts
@@ -833,6 +878,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		} else if m.viewMode == ViewModeContactDetails {
 			// For contact edit - not fully implemented yet but placeholder
 			m.viewMode = ViewModeContactEdit
+		} else if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			// 'E' on a contact in roster: show contact details view
+			contactJID := m.roster.SelectedJID()
+			if contactJID != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = contactJID
+			}
 		}
 
 	case keybindings.ActionToggleAutoConnect:
@@ -854,9 +906,20 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 
 	case keybindings.ActionSetWindowAccount:
-		// Space key on accounts: connect if offline, switch if online
+		// Space key on accounts: connect if offline, switch if online, deselect if active
 		if m.roster.FocusSection() == roster.SectionAccounts {
 			if jid := m.roster.SelectedAccountJID(); jid != "" {
+				// Check if this is the currently active account - deselect it
+				if jid == m.app.CurrentAccount() {
+					m.app.SwitchActiveAccount("")
+					m.windows = m.windows.SetAccountForActive("")
+					m.roster = m.roster.SetContacts(m.app.GetContacts())
+					m.viewMode = ViewModeNormal
+					m.detailAccountJID = ""
+					m.chat = m.chat.SetStatusMsg("No account selected")
+					return nil
+				}
+
 				// Check account status
 				accounts := m.app.GetAllAccountsDisplay()
 				for _, acc := range accounts {
@@ -885,9 +948,18 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 
 	case keybindings.ActionToggleStatusSharing:
-		// Toggle status sharing for current contact (in contact details view)
+		// Toggle status sharing for current contact
+		var targetJID string
 		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
-			enabled, err := m.app.ToggleStatusSharing(m.detailContactJID)
+			targetJID = m.detailContactJID
+		} else if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			targetJID = m.roster.SelectedJID()
+		} else if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			targetJID = m.windows.ActiveJID()
+		}
+
+		if targetJID != "" {
+			enabled, err := m.app.ToggleStatusSharing(targetJID)
 			if err != nil {
 				m.dialog = m.dialog.ShowError("Failed to toggle status sharing: " + err.Error())
 				m.focus = FocusDialog
@@ -896,7 +968,9 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				if enabled {
 					stateStr = "ON"
 				}
-				m.chat = m.chat.SetStatusMsg("Status sharing " + stateStr + " for " + m.detailContactJID)
+				m.chat = m.chat.SetStatusMsg("Status sharing " + stateStr + " for " + targetJID)
+				// Refresh roster to show updated status
+				m.roster = m.roster.SetContacts(m.app.GetContacts())
 			}
 		}
 
@@ -916,6 +990,43 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 			m.chat = m.chat.SetContactData(&contactData)
 			m.chat = m.chat.SetHeaderFocused(true)
 			m.focus = FocusChatHeader
+		}
+
+	case keybindings.ActionOpenFileURL:
+		// Open file URL in browser (with security checks)
+		if m.focus == FocusChat {
+			if selMsg := m.chat.SelectedMessage(); selMsg != nil && selMsg.FileURL != "" {
+				url := selMsg.FileURL
+
+				// Security: Validate HTTPS
+				if !strings.HasPrefix(url, "https://") {
+					m.dialog = m.dialog.ShowError("Only HTTPS URLs are allowed for security")
+					m.focus = FocusDialog
+					return nil
+				}
+
+				// Security: Warn about dangerous file types
+				if isDangerousFileType(url) {
+					m.dialog = m.dialog.ShowError("Warning: This file type may be dangerous. URL: " + url)
+					m.focus = FocusDialog
+					return nil
+				}
+
+				_ = openURL(url)
+				m.chat = m.chat.SetStatusMsg("Opening URL...")
+			}
+		}
+
+	case keybindings.ActionCopyFileURL:
+		// Copy file URL to clipboard
+		if m.focus == FocusChat {
+			if selMsg := m.chat.SelectedMessage(); selMsg != nil && selMsg.FileURL != "" {
+				if err := copyToClipboard(selMsg.FileURL); err == nil {
+					m.chat = m.chat.SetStatusMsg("URL copied to clipboard")
+				} else {
+					m.chat = m.chat.SetStatusMsg("Failed to copy URL")
+				}
+			}
 		}
 	}
 
@@ -1263,11 +1374,26 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 	switch event.Type {
 	case app.EventRosterUpdate:
 		contacts := m.app.GetContacts()
-		fmt.Printf("[DEBUG] EventRosterUpdate received, contacts count: %d\n", len(contacts))
 		m.roster = m.roster.SetContacts(contacts)
 
 	case app.EventMessage:
-		if msg, ok := event.Data.(app.ChatMessage); ok {
+		// Handle both app.ChatMessage and chat.Message types
+		switch msg := event.Data.(type) {
+		case app.ChatMessage:
+			// Convert to chat.Message
+			chatMsg := chat.Message{
+				ID:        msg.ID,
+				From:      msg.From,
+				To:        msg.To,
+				Body:      msg.Body,
+				Timestamp: msg.Timestamp,
+				Encrypted: msg.Encrypted,
+				Type:      msg.Type,
+				Outgoing:  msg.Outgoing,
+				Status:    chat.MessageStatus(msg.Status),
+			}
+			m.chat = m.chat.AddMessage(chatMsg)
+		case chat.Message:
 			m.chat = m.chat.AddMessage(msg)
 		}
 
@@ -1297,6 +1423,12 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 			m.dialog = m.dialog.ShowError(errMsg)
 			m.focus = FocusDialog
 		}
+
+	case app.EventReceipt:
+		// Handle message status update (delivery/read receipt)
+		if statusUpdate, ok := event.Data.(app.MessageStatusUpdateMsg); ok {
+			m.chat = m.chat.UpdateMessageStatus(statusUpdate.MessageID, chat.MessageStatus(statusUpdate.Status))
+		}
 	}
 
 	return nil
@@ -1309,7 +1441,13 @@ func (m *Model) executeCommand(cmd string, args []string) tea.Cmd {
 
 // openChat opens a chat window for the given JID
 func (m *Model) openChat(jid string) {
-	m.windows = m.windows.OpenChat(jid)
+	var ok bool
+	m.windows, ok = m.windows.OpenChatResult(jid)
+	if !ok {
+		m.dialog = m.dialog.ShowError("Cannot open more windows (max 20). Close a window first.")
+		m.focus = FocusDialog
+		return
+	}
 	history := m.app.GetChatHistory(jid)
 	m.chat = m.chat.SetJID(jid)
 	m.chat = m.chat.SetHistory(history)
@@ -1545,10 +1683,8 @@ func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
 				m.windows, ok = m.windows.GoToResult(win - 1)
 				if ok {
 					m.loadActiveWindow()
-				} else {
-					m.dialog = m.dialog.ShowError("Window " + winStr + " does not exist. Open a chat first with Enter on a contact.")
-					m.focus = FocusDialog
 				}
+				// Silently ignore if window doesn't exist
 			}
 		}
 
@@ -1731,6 +1867,19 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				m.app.RemoveAccount(jid)
 			}
 		}
+
+	case dialogs.DialogConfirmSaveMessages:
+		if result.Confirmed {
+			// User confirmed - enable message saving
+			m.settings = m.settings.EnableSaveMessages()
+			m.chat = m.chat.SetStatusMsg("Message saving enabled")
+			// Return to settings view
+			m.focus = FocusSettings
+		} else {
+			// User cancelled - return to settings
+			m.focus = FocusSettings
+		}
+		return nil
 
 	case dialogs.DialogRegister:
 		if result.Confirmed {
@@ -1937,4 +2086,52 @@ func (m *Model) getContactDetailData(jid string) chat.ContactDetailData {
 	}
 	// Return empty data if not found
 	return chat.ContactDetailData{JID: jid, Status: "offline"}
+}
+
+// Dangerous file extensions that may execute code
+var dangerousExtensions = []string{
+	".exe", ".msi", ".bat", ".cmd", ".ps1", ".sh", ".bash",
+	".app", ".dmg", ".pkg", ".deb", ".rpm",
+	".jar", ".py", ".rb", ".pl",
+	".vbs", ".js", ".hta", ".scr",
+}
+
+// isDangerousFileType checks if a URL points to a potentially dangerous file
+func isDangerousFileType(url string) bool {
+	lower := strings.ToLower(url)
+	for _, ext := range dangerousExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// openURL opens a URL in the default browser
+func openURL(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
+}
+
+// copyToClipboard copies text to the system clipboard
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }

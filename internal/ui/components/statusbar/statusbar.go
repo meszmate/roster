@@ -110,32 +110,6 @@ func (m Model) View() string {
 
 	modeText := modeStyle.Render(m.mode.String())
 
-	// Connection status indicator and text
-	var connStatus string
-	var statusText string
-	switch m.status {
-	case "online":
-		connStatus = m.styles.PresenceOnline.Render("●")
-	case "connecting":
-		connStatus = m.styles.PresenceAway.Render("◐")
-		statusText = m.styles.PresenceAway.Render(" [connecting...]")
-	case "failed":
-		connStatus = m.styles.PresenceDND.Render("✗")
-		statusText = m.styles.PresenceDND.Render(" [failed]")
-	default:
-		connStatus = m.styles.PresenceOffline.Render("○")
-		if m.status != "" && m.status != "offline" {
-			statusText = fmt.Sprintf(" [%s]", m.status)
-		}
-	}
-
-	// Account
-	account := m.account
-	if account == "" {
-		account = "Not connected"
-	}
-	accountText := m.styles.StatusAccount.Render(account)
-
 	// Extra info (like encryption status, typing, etc.)
 	extra := ""
 	if m.extraInfo != "" {
@@ -173,19 +147,46 @@ func (m Model) View() string {
 		windowsStr = "[" + strings.Join(parts, " ") + "]"
 	}
 
-	// Window account indicator (if different from main account)
-	windowAccStr := ""
-	if m.windowAccount != "" && m.windowAccount != m.account {
-		// Show just the user part of the JID
-		windowAcc := m.windowAccount
-		if idx := strings.Index(windowAcc, "@"); idx > 0 {
-			windowAcc = windowAcc[:idx]
+	// Build account section only if an account is active
+	var accountSection string
+	if m.account != "" {
+		// Connection status indicator and text
+		var connStatus string
+		var statusText string
+		switch m.status {
+		case "online":
+			connStatus = m.styles.PresenceOnline.Render("●")
+		case "connecting":
+			connStatus = m.styles.PresenceAway.Render("◐")
+			statusText = m.styles.PresenceAway.Render(" [connecting...]")
+		case "failed":
+			connStatus = m.styles.PresenceDND.Render("✗")
+			statusText = m.styles.PresenceDND.Render(" [failed]")
+		default:
+			connStatus = m.styles.PresenceOffline.Render("○")
+			if m.status != "" && m.status != "offline" {
+				statusText = fmt.Sprintf(" [%s]", m.status)
+			}
 		}
-		windowAccStr = " | Win:" + windowAcc
+
+		accountText := m.styles.StatusAccount.Render(m.account)
+
+		// Window account indicator (if different from main account)
+		windowAccStr := ""
+		if m.windowAccount != "" && m.windowAccount != m.account {
+			// Show just the user part of the JID
+			windowAcc := m.windowAccount
+			if idx := strings.Index(windowAcc, "@"); idx > 0 {
+				windowAcc = windowAcc[:idx]
+			}
+			windowAccStr = " | Win:" + windowAcc
+		}
+
+		accountSection = fmt.Sprintf(" %s %s%s%s", connStatus, accountText, statusText, windowAccStr)
 	}
 
 	// Build left and right parts
-	left := fmt.Sprintf(" %s %s %s%s%s", modeText, connStatus, accountText, statusText, windowAccStr)
+	left := fmt.Sprintf(" %s%s", modeText, accountSection)
 	right := windowsStr + extra + " "
 
 	// Calculate padding

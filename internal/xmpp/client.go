@@ -2,7 +2,9 @@ package xmpp
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -36,6 +38,7 @@ type Client struct {
 	onConnect    func()
 	onDisconnect func(err error)
 	onError      func(err error)
+	onReceipt    func(messageID string, status string) // "delivered" or "read"
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -268,26 +271,81 @@ func (c *Client) handleStanzas() {
 
 // handleMessage processes a message stanza
 func (c *Client) handleMessage(session *xmpp.Session, start xml.StartElement) {
-	// Skip the message content for now
-	// In a full implementation, we would decode the message body
-	if c.onMessage != nil {
-		msg := Message{
-			Timestamp: time.Now(),
+	msg := Message{
+		Timestamp: time.Now(),
+	}
+
+	// Parse attributes
+	for _, attr := range start.Attr {
+		switch attr.Name.Local {
+		case "from":
+			msg.From, _ = jid.Parse(attr.Value)
+		case "to":
+			msg.To, _ = jid.Parse(attr.Value)
+		case "id":
+			msg.ID = attr.Value
+		case "type":
+			msg.Type = stanza.MessageType(attr.Value)
 		}
-		// Parse attributes
-		for _, attr := range start.Attr {
-			switch attr.Name.Local {
-			case "from":
-				msg.From, _ = jid.Parse(attr.Value)
-			case "to":
-				msg.To, _ = jid.Parse(attr.Value)
-			case "id":
-				msg.ID = attr.Value
-			case "type":
-				msg.Type = stanza.MessageType(attr.Value)
+	}
+
+	// Read child elements to get body and receipts
+	tokenReader := session.TokenReader()
+	hasBody := false
+
+	for {
+		tok, err := tokenReader.Token()
+		if err != nil {
+			break
+		}
+
+		switch t := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case t.Name.Local == "body":
+				// Read body text
+				if bodyTok, err := tokenReader.Token(); err == nil {
+					if charData, ok := bodyTok.(xml.CharData); ok {
+						msg.Body = string(charData)
+						hasBody = true
+					}
+				}
+
+			case t.Name.Local == "received" && t.Name.Space == "urn:xmpp:receipts":
+				// XEP-0184 delivery receipt
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "id" {
+						if c.onReceipt != nil {
+							c.onReceipt(attr.Value, "delivered")
+						}
+						break
+					}
+				}
+
+			case t.Name.Local == "displayed" && t.Name.Space == "urn:xmpp:chat-markers:0":
+				// XEP-0333 read marker
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "id" {
+						if c.onReceipt != nil {
+							c.onReceipt(attr.Value, "read")
+						}
+						break
+					}
+				}
+
+			case t.Name.Local == "encrypted":
+				msg.Encrypted = true
+			}
+
+		case xml.EndElement:
+			if t.Name.Local == "message" {
+				// End of message stanza
+				if hasBody && c.onMessage != nil {
+					c.onMessage(msg)
+				}
+				return
 			}
 		}
-		c.onMessage(msg)
 	}
 }
 
@@ -442,28 +500,69 @@ func (c *Client) handleDisconnect(err error) {
 	}
 }
 
-// SendMessage sends a message
-func (c *Client) SendMessage(to string, body string) error {
+// messageBody represents the body element in a message stanza
+type messageBody struct {
+	XMLName xml.Name `xml:"body"`
+	Text    string   `xml:",chardata"`
+}
+
+// messageRequest represents a request for delivery receipt
+type messageRequest struct {
+	XMLName xml.Name `xml:"urn:xmpp:receipts request"`
+}
+
+// messageMarkable represents a markable indicator for chat markers
+type messageMarkable struct {
+	XMLName xml.Name `xml:"urn:xmpp:chat-markers:0 markable"`
+}
+
+// messageWithBody represents a message with body for XML encoding
+type messageWithBody struct {
+	stanza.Message
+	Body     messageBody     `xml:"body"`
+	Request  messageRequest  `xml:"urn:xmpp:receipts request"`
+	Markable messageMarkable `xml:"urn:xmpp:chat-markers:0 markable"`
+}
+
+// randomString generates a random hex string of the specified byte length
+func randomString(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// SendMessage sends a message and returns the message ID
+func (c *Client) SendMessage(to string, body string) (string, error) {
 	c.mu.RLock()
 	if !c.connected {
 		c.mu.RUnlock()
-		return fmt.Errorf("not connected")
+		return "", fmt.Errorf("not connected")
 	}
 	session := c.session
 	c.mu.RUnlock()
 
 	toJID, err := jid.Parse(to)
 	if err != nil {
-		return fmt.Errorf("invalid JID: %w", err)
+		return "", fmt.Errorf("invalid JID: %w", err)
 	}
 
-	msg := stanza.Message{
-		To:   toJID,
-		Type: stanza.ChatMessage,
+	// Generate unique message ID
+	id := fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomString(4))
+
+	msg := messageWithBody{
+		Message: stanza.Message{
+			ID:   id,
+			To:   toJID,
+			Type: stanza.ChatMessage,
+		},
+		Body:     messageBody{Text: body},
+		Request:  messageRequest{},
+		Markable: messageMarkable{},
 	}
 
 	// Encode the message
-	return session.Encode(c.ctx, msg)
+	err = session.Encode(c.ctx, msg)
+	return id, err
 }
 
 // SendPresence sends a presence update with show and status
@@ -748,6 +847,88 @@ func (c *Client) SetDisconnectHandler(handler func(err error)) {
 // SetErrorHandler sets the error handler
 func (c *Client) SetErrorHandler(handler func(err error)) {
 	c.onError = handler
+}
+
+// SetReceiptHandler sets the delivery/read receipt handler
+// status is "delivered" (XEP-0184) or "read" (XEP-0333)
+func (c *Client) SetReceiptHandler(handler func(messageID string, status string)) {
+	c.onReceipt = handler
+}
+
+// receivedElement represents a XEP-0184 delivery receipt
+type receivedElement struct {
+	XMLName xml.Name `xml:"urn:xmpp:receipts received"`
+	ID      string   `xml:"id,attr"`
+}
+
+// displayedElement represents a XEP-0333 read marker
+type displayedElement struct {
+	XMLName xml.Name `xml:"urn:xmpp:chat-markers:0 displayed"`
+	ID      string   `xml:"id,attr"`
+}
+
+// messageWithReceipt represents a message containing a delivery receipt
+type messageWithReceipt struct {
+	stanza.Message
+	Received receivedElement `xml:"urn:xmpp:receipts received"`
+}
+
+// messageWithDisplayed represents a message containing a read marker
+type messageWithDisplayed struct {
+	stanza.Message
+	Displayed displayedElement `xml:"urn:xmpp:chat-markers:0 displayed"`
+}
+
+// SendReceipt sends a XEP-0184 delivery receipt for a message
+func (c *Client) SendReceipt(to, messageID string) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	toJID, err := jid.Parse(to)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+
+	msg := messageWithReceipt{
+		Message: stanza.Message{
+			To:   toJID,
+			Type: stanza.ChatMessage,
+		},
+		Received: receivedElement{ID: messageID},
+	}
+
+	return session.Encode(c.ctx, msg)
+}
+
+// SendDisplayedMarker sends a XEP-0333 read marker for a message
+func (c *Client) SendDisplayedMarker(to, messageID string) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	toJID, err := jid.Parse(to)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+
+	msg := messageWithDisplayed{
+		Message: stanza.Message{
+			To:   toJID,
+			Type: stanza.ChatMessage,
+		},
+		Displayed: displayedElement{ID: messageID},
+	}
+
+	return session.Encode(c.ctx, msg)
 }
 
 // RoomConfig holds configuration options for creating a MUC room
