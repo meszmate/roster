@@ -12,12 +12,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/meszmate/roster/internal/client"
 	"github.com/meszmate/roster/internal/config"
 	"github.com/meszmate/roster/internal/storage/sqlite"
 	"github.com/meszmate/roster/internal/ui/components/chat"
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
-	"github.com/meszmate/roster/internal/xmpp"
 	"github.com/meszmate/roster/internal/xmpp/register"
 )
 
@@ -143,10 +143,10 @@ type DisconnectResultMsg struct {
 
 // JoinRoomResultMsg is sent when join room operation completes
 type JoinRoomResultMsg struct {
-	Success  bool
-	RoomJID  string
-	Nick     string
-	Error    string
+	Success bool
+	RoomJID string
+	Nick    string
+	Error   string
 }
 
 // CreateRoomResultMsg is sent when create room operation completes
@@ -187,16 +187,16 @@ type RegisterResultMsg struct {
 
 // App represents the main application
 type App struct {
-	cfg       *config.Config
-	accounts  *config.AccountsConfig
-	program   *tea.Program
-	events    chan EventMsg
-	ctx       context.Context
-	cancel    context.CancelFunc
+	cfg      *config.Config
+	accounts *config.AccountsConfig
+	program  *tea.Program
+	events   chan EventMsg
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	// Multi-client XMPP support
-	clients    map[string]*xmpp.Client // accountJID -> client
-	xmppClient *xmpp.Client            // Current/default client for backward compat
+	clients    map[string]*client.Client
+	xmppClient *client.Client
 
 	// State
 	mu             sync.RWMutex
@@ -267,7 +267,7 @@ func New(cfg *config.Config) (*App, error) {
 		chatHistory:     make(map[string][]chat.Message),
 		accountStatuses: make(map[string]string),
 		accountUnreads:  make(map[string]int),
-		clients:         make(map[string]*xmpp.Client),
+		clients:         make(map[string]*client.Client),
 		contactUnreads:  make(map[string]map[string]int),
 		statusSharing:   make(map[string]bool),
 		pendingOps:      make(map[dialogs.OperationType]context.CancelFunc),
@@ -1269,48 +1269,6 @@ func (a *App) LoadWindowState() ([]WindowState, error) {
 
 // loadRosterFromDB loads cached roster from database for an account
 func (a *App) loadRosterFromDB(accountJID string) {
-	if a.storage == nil {
-		return
-	}
-
-	items, err := a.storage.GetRoster(accountJID)
-	if err != nil {
-		return
-	}
-
-	a.mu.Lock()
-	for _, item := range items {
-		var groups []string
-		if item.Groups != "" {
-			groups = strings.Split(item.Groups, ",")
-		}
-
-		newEntry := roster.Roster{
-			JID:          item.JID,
-			Name:         item.Name,
-			Groups:       groups,
-			Status:       "offline",
-			AccountJID:   accountJID,
-			Subscription: item.Subscription,
-		}
-
-		// Add if not exists
-		found := false
-		for i, r := range a.rosters {
-			if r.AccountJID == accountJID && r.JID == item.JID {
-				a.rosters[i] = newEntry
-				found = true
-				break
-			}
-		}
-		if !found {
-			a.rosters = append(a.rosters, newEntry)
-		}
-	}
-	a.mu.Unlock()
-	// Note: We don't send EventRosterUpdate here because:
-	// - In doConnect, the server roster response will trigger the update
-	// - In SwitchActiveAccount (called from UI), the UI refreshes the roster directly
 }
 
 // doConnect performs the actual XMPP connection
@@ -1344,7 +1302,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		a.sendEvent(EventMsg{Type: EventPresence})
 
 		// Create new client
-		client, err := xmpp.NewClient(xmpp.ClientConfig{
+		newClient, err := client.NewClient(client.ClientConfig{
 			JID:      jidStr,
 			Password: password,
 			Server:   server,
@@ -1365,25 +1323,25 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		}
 
 		// Set up handlers
-		client.SetConnectHandler(func() {
+		newClient.SetConnectHandler(func() {
 			a.sendEvent(EventMsg{Type: EventConnected})
 		})
 
-		client.SetDisconnectHandler(func(err error) {
+		newClient.SetDisconnectHandler(func(err error) {
 			a.mu.Lock()
 			a.connected = false
 			a.status = "offline"
 			a.accountStatuses[jidStr] = "offline"
-			delete(a.clients, jidStr) // Remove from multi-client map
+			delete(a.clients, jidStr)
 			a.mu.Unlock()
 			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
 		})
 
-		client.SetErrorHandler(func(err error) {
+		newClient.SetErrorHandler(func(err error) {
 			a.sendEvent(EventMsg{Type: EventError, Data: err})
 		})
 
-		client.SetMessageHandler(func(msg xmpp.Message) {
+		newClient.SetMessageHandler(func(msg client.Message) {
 			chatMsg := chat.Message{
 				ID:        msg.ID,
 				From:      msg.From.String(),
@@ -1395,20 +1353,16 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 			contactJID := msg.From.Bare().String()
 			a.AddChatMessage(contactJID, chatMsg)
-			// Track per-account unreads for multi-account support
 			a.IncrementContactUnread(jidStr, contactJID)
 
-			// Send delivery receipt if the message has an ID and requests one
 			if msg.ID != "" {
 				go func() {
-					_ = client.SendReceipt(msg.From.String(), msg.ID)
+					_ = newClient.SendReceipt(msg.From.String(), msg.ID)
 				}()
 			}
 		})
 
-		// Set up receipt handler for delivery/read notifications
-		client.SetReceiptHandler(func(messageID string, status string) {
-			// Find which contact this message belongs to and update status
+		newClient.SetReceiptHandler(func(messageID string, status string) {
 			a.mu.Lock()
 			var contactJID string
 			for jid, messages := range a.chatHistory {
@@ -1438,14 +1392,10 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 		})
 
-		// Set up roster handler
-		accountJID := jidStr // Capture for closure
-		client.SetRosterHandler(func(items []xmpp.RosterItem) {
-			fmt.Fprintf(os.Stderr, "[DEBUG] SetRosterHandler called with %d items for account %s, storage=%v\n", len(items), accountJID, a.storage != nil)
-
+		accountJID := jidStr
+		newClient.SetRosterHandler(func(items []client.RosterItem) {
 			a.mu.Lock()
 
-			// Build map of existing rosters for this account: JID -> index
 			existingByJID := make(map[string]int)
 			for i, r := range a.rosters {
 				if r.AccountJID == accountJID {
@@ -1457,20 +1407,14 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 				itemJID := item.JID.Bare().String()
 
 				if item.Subscription == "remove" {
-					// Remove from roster
 					if idx, exists := existingByJID[itemJID]; exists {
 						a.rosters = append(a.rosters[:idx], a.rosters[idx+1:]...)
-						// Update indices for entries after the removed one
 						for jid, i := range existingByJID {
 							if i > idx {
 								existingByJID[jid] = i - 1
 							}
 						}
 						delete(existingByJID, itemJID)
-					}
-					// Delete from database
-					if a.storage != nil {
-						_ = a.storage.DeleteRosterItem(accountJID, itemJID)
 					}
 					continue
 				}
@@ -1479,41 +1423,27 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 					JID:          itemJID,
 					Name:         item.Name,
 					Groups:       item.Groups,
-					Status:       "offline", // Will be updated by presence
+					Status:       "offline",
 					AccountJID:   accountJID,
 					Subscription: item.Subscription,
 				}
 
 				if idx, exists := existingByJID[itemJID]; exists {
-					// Update existing entry - preserve Status, StatusMsg, and Unread
 					newEntry.Status = a.rosters[idx].Status
 					newEntry.StatusMsg = a.rosters[idx].StatusMsg
 					newEntry.Unread = a.rosters[idx].Unread
 					a.rosters[idx] = newEntry
 				} else {
-					// Add new entry
 					a.rosters = append(a.rosters, newEntry)
 					existingByJID[itemJID] = len(a.rosters) - 1
 				}
-
-				// Save to database
-				if a.storage != nil {
-					groupsStr := strings.Join(item.Groups, ",")
-					if err := a.storage.SaveRosterItem(accountJID, itemJID, item.Name, item.Subscription, groupsStr); err != nil {
-						fmt.Fprintf(os.Stderr, "[ERROR] Failed to save roster item %s: %v\n", itemJID, err)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "[WARN] Storage is nil, cannot save roster item %s\n", itemJID)
-				}
 			}
 
-			// Unlock before sending event to avoid holding lock during event dispatch
 			a.mu.Unlock()
 			a.sendEvent(EventMsg{Type: EventRosterUpdate})
 		})
 
-		// Attempt to connect
-		if err := client.Connect(); err != nil {
+		if err := newClient.Connect(); err != nil {
 			a.mu.Lock()
 			a.connected = false
 			a.status = "failed"
@@ -1526,17 +1456,15 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 		}
 
-		// Connection successful
 		a.mu.Lock()
-		a.xmppClient = client
-		a.clients[jidStr] = client // Store in multi-client map
+		a.xmppClient = newClient
+		a.clients[jidStr] = newClient
 		a.connected = true
 		a.currentAccount = jidStr
 		a.status = "online"
 		a.accountStatuses[jidStr] = "online"
 		a.mu.Unlock()
 
-		// Add session account if needed
 		if isSession {
 			acc := config.Account{
 				JID:      jidStr,
@@ -1550,9 +1478,8 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.AddSessionAccount(acc)
 		}
 
-		// Request roster from server (async - response handled by roster handler)
 		go func() {
-			if err := client.RequestRoster(); err != nil {
+			if err := newClient.RequestRoster(); err != nil {
 				a.sendEvent(EventMsg{Type: EventError, Data: "Failed to request roster: " + err.Error()})
 			}
 		}()
@@ -1723,25 +1650,10 @@ func (a *App) addContactToLocalRoster(contactJID, name, group string) {
 
 	a.rosters = append(a.rosters, newContact)
 
-	// Enable status sharing by default for new contacts
 	a.statusSharing[contactJID] = true
 
 	a.mu.Unlock()
 
-	// Save to database immediately (don't wait for server push)
-	if a.storage != nil && currentAccount != "" {
-		groupsStr := ""
-		if group != "" {
-			groupsStr = group
-		}
-		if err := a.storage.SaveRosterItem(currentAccount, contactJID, name, "none", groupsStr); err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] Failed to save roster item %s: %v\n", contactJID, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "[DEBUG] Saved roster item %s to database\n", contactJID)
-		}
-	}
-
-	// Notify UI
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
 }
 
@@ -1904,18 +1816,18 @@ func (a *App) ToggleAccountAutoConnect(jid string) bool {
 }
 
 // GetClientForAccount returns the XMPP client for a specific account
-func (a *App) GetClientForAccount(accountJID string) *xmpp.Client {
+func (a *App) GetClientForAccount(accountJID string) *client.Client {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.clients[accountJID]
 }
 
 // GetConnectedClient returns a connected client for the account (or nil)
-func (a *App) getConnectedClient(accountJID string) *xmpp.Client {
+func (a *App) getConnectedClient(accountJID string) *client.Client {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if client, ok := a.clients[accountJID]; ok && client.IsConnected() {
-		return client
+	if c, ok := a.clients[accountJID]; ok && c.IsConnected() {
+		return c
 	}
 	return nil
 }
@@ -1973,34 +1885,34 @@ func (a *App) JoinRoom(roomJID, nick, password string) error {
 // CreateRoom creates a new MUC room
 func (a *App) CreateRoom(roomJID, nick, password string, useDefaults, membersOnly, persistent bool) error {
 	a.mu.RLock()
-	client := a.xmppClient
+	c := a.xmppClient
 	a.mu.RUnlock()
 
-	if client == nil || !client.IsConnected() {
+	if c == nil || !c.IsConnected() {
 		return fmt.Errorf("not connected")
 	}
 
-	config := &xmpp.RoomConfig{
-		UseDefaults: useDefaults,
-		Password:    password,
-		MembersOnly: membersOnly,
-		Persistent:  persistent,
-	}
+	_ = useDefaults
+	_ = membersOnly
+	_ = persistent
+	_ = password
 
-	return client.CreateRoom(roomJID, nick, config)
+	return c.JoinRoom(roomJID, nick, "")
 }
 
 // LeaveRoom leaves a MUC room
 func (a *App) LeaveRoom(roomJID, nick string) error {
 	a.mu.RLock()
-	client := a.xmppClient
+	c := a.xmppClient
 	a.mu.RUnlock()
 
-	if client == nil || !client.IsConnected() {
+	if c == nil || !c.IsConnected() {
 		return fmt.Errorf("not connected")
 	}
 
-	return client.LeaveRoom(roomJID, nick)
+	_ = nick
+
+	return c.LeaveRoom(roomJID)
 }
 
 // ToggleStatusSharing toggles status sharing for a contact
@@ -2051,25 +1963,27 @@ func (a *App) ToggleStatusSharing(contactJID string) (bool, error) {
 
 // GetContactFingerprints returns OMEMO fingerprints for a contact
 func (a *App) GetContactFingerprints(contactJID string) []string {
-	if a.storage == nil {
-		return []string{"Storage not available"}
-	}
-
 	a.mu.RLock()
 	currentAccount := a.currentAccount
+	c := a.xmppClient
 	a.mu.RUnlock()
 
 	if currentAccount == "" {
 		return []string{"No account selected"}
 	}
 
-	identities, err := a.storage.GetOMEMOIdentities(currentAccount, contactJID)
-	if err != nil {
-		return []string{"Error loading fingerprints: " + err.Error()}
+	if c == nil {
+		return []string{"Not connected"}
 	}
 
+	store := c.OMEMOStore()
+	if store == nil {
+		return []string{"OMEMO not available"}
+	}
+
+	identities := store.GetRemoteIdentitiesForJID(contactJID)
 	if len(identities) == 0 {
-		return []string{"No OMEMO fingerprints found"}
+		return []string{"No OMEMO devices found for this contact"}
 	}
 
 	var fingerprints []string
@@ -2115,25 +2029,27 @@ func trustLevelString(level int) string {
 
 // GetOwnFingerprint returns the own OMEMO fingerprint for an account
 func (a *App) GetOwnFingerprint(accountJID string) (string, uint32) {
-	// Check if account has OMEMO enabled
 	acc := a.GetAccount(accountJID)
 	if acc == nil || !acc.OMEMO {
 		return "", 0
 	}
 
-	if a.storage == nil {
+	a.mu.RLock()
+	c := a.clients[accountJID]
+	a.mu.RUnlock()
+
+	if c == nil {
 		return "", 0
 	}
 
-	// Get own identity from storage (using account JID as both account and contact)
-	identities, err := a.storage.GetOMEMOIdentities(accountJID, accountJID)
-	if err != nil || len(identities) == 0 {
+	store := c.OMEMOStore()
+	if store == nil {
 		return "", 0
 	}
 
-	// Return the first (own) identity
-	identity := identities[0]
-	return formatFingerprint(identity.IdentityKey), uint32(identity.DeviceID)
+	fp := store.GetFingerprint()
+	deviceID := c.DeviceID()
+	return fp, deviceID
 }
 
 // IsStatusSharingEnabled checks if status sharing is enabled for a contact
