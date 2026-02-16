@@ -39,6 +39,7 @@ const (
 	DialogRegisterSuccess
 	DialogConfirmSaveMessages
 	DialogBookmarks
+	DialogSetStatus
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -306,6 +307,21 @@ func (m Model) GetSelectedBookmark() (BookmarkInfo, int, bool) {
 		return BookmarkInfo{}, 0, false
 	}
 	return m.bookmarks[m.selectedBookmark], m.selectedBookmark, true
+}
+
+// ShowSetStatus shows status setting dialog
+func (m Model) ShowSetStatus(currentStatus, currentMsg string) Model {
+	m.dialogType = DialogSetStatus
+	m.title = "Set Status"
+	m.inputs = []DialogInput{
+		{Label: "Status", Key: "status", Value: currentStatus, ReadOnly: true},
+		{Label: "Message", Key: "message", Value: currentMsg, Cursor: len(currentMsg)},
+	}
+	m.buttons = []string{"Online", "Away", "DND", "XA", "Offline", "Cancel"}
+	m.activeBtn = 0
+	m.activeInput = 1
+	m.inCheckboxes = false
+	return m
 }
 
 // ShowSubscription shows subscription request dialog

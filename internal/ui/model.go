@@ -1058,6 +1058,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionShowParticipants:
 		// Toggle participant list for current MUC room
 		m.muc = m.muc.ToggleParticipants()
+
+	case keybindings.ActionSetStatus:
+		// Show status dialog
+		currentStatus := m.app.Status()
+		currentMsg := ""
+		m.dialog = m.dialog.ShowSetStatus(currentStatus, currentMsg)
+		m.focus = FocusDialog
 	}
 
 	return nil
@@ -2097,6 +2104,15 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				// Delete bookmark
 				_ = m.app.DeleteBookmark(bm.RoomJID)
 			}
+		}
+
+	case dialogs.DialogSetStatus:
+		// Button 0-4 are status types, 5 is cancel
+		if result.Button < 5 {
+			statuses := []string{"online", "away", "dnd", "xa", "offline"}
+			status := statuses[result.Button]
+			message := result.Values["message"]
+			_ = m.app.SetStatusAndSend(status, message)
 		}
 	}
 

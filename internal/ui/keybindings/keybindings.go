@@ -138,6 +138,7 @@ const (
 
 	// Settings
 	ActionShowSettings
+	ActionSetStatus
 
 	// Window management
 	ActionSaveWindows
@@ -311,6 +312,7 @@ func (m *Manager) setupDefaultBindings() {
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings
 		"S":  ActionShowSettings,
+		"Gs": ActionSetStatus, // 'G' prefix + 's' for set status
 
 		// Window management
 		"gw": ActionSaveWindows, // 'g' prefix + 'w' for save windows
