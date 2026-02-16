@@ -1345,6 +1345,35 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.sendEvent(EventMsg{Type: EventError, Data: err})
 		})
 
+		newClient.SetPresenceHandler(func(pr client.Presence) {
+			contactJID := pr.From.Bare().String()
+			status := pr.Status
+			if status == "" {
+				status = pr.Show
+			}
+			if status == "" {
+				status = "online"
+			}
+
+			a.mu.Lock()
+			for i, r := range a.rosters {
+				if r.JID == contactJID {
+					a.rosters[i].Status = status
+					if pr.Status != "" {
+						a.rosters[i].StatusMsg = pr.Status
+					}
+					break
+				}
+			}
+			a.mu.Unlock()
+
+			a.sendEvent(EventMsg{Type: EventPresence, Data: PresenceUpdate{
+				JID:       contactJID,
+				Status:    status,
+				StatusMsg: pr.Status,
+			}})
+		})
+
 		newClient.SetMessageHandler(func(msg client.Message) {
 			chatMsg := chat.Message{
 				ID:        msg.ID,
