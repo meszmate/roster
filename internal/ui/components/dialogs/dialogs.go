@@ -23,6 +23,7 @@ const (
 	DialogCreateRoom
 	DialogContactInfo
 	DialogFingerprint
+	DialogOMEMODevices
 	DialogSubscription
 	DialogHelp
 	DialogAccountAdd
@@ -92,7 +93,7 @@ type Model struct {
 	checkboxes     []DialogCheckbox
 	activeInput    int
 	activeCheckbox int
-	inCheckboxes   bool // true if focus is in checkboxes section
+	inCheckboxes   bool
 	buttons        []string
 	activeBtn      int
 	width          int
@@ -107,6 +108,18 @@ type Model struct {
 	// Scroll state for help dialog
 	scrollOffset    int
 	maxVisibleLines int
+
+	// OMEMO devices
+	omemoDevices   []OMEMODeviceInfo
+	selectedDevice int
+}
+
+// OMEMODeviceInfo represents info about an OMEMO device
+type OMEMODeviceInfo struct {
+	DeviceID    uint32
+	Fingerprint string
+	TrustLevel  int
+	TrustString string
 }
 
 // DialogInput represents an input field in a dialog
@@ -239,6 +252,27 @@ func (m Model) ShowFingerprint(jid string, fingerprints []string) Model {
 	m.inputs = nil
 	m.data["jid"] = jid
 	return m
+}
+
+// ShowOMEMODevices shows OMEMO device management dialog
+func (m Model) ShowOMEMODevices(jid string, devices []OMEMODeviceInfo) Model {
+	m.dialogType = DialogOMEMODevices
+	m.title = "OMEMO Devices - " + jid
+	m.omemoDevices = devices
+	m.selectedDevice = 0
+	m.buttons = []string{"Trust", "Verify", "Untrust", "Delete", "Close"}
+	m.activeBtn = 4
+	m.inputs = nil
+	m.data["jid"] = jid
+	return m
+}
+
+// GetSelectedOMEMODevice returns the currently selected OMEMO device
+func (m Model) GetSelectedOMEMODevice() (OMEMODeviceInfo, int, bool) {
+	if len(m.omemoDevices) == 0 || m.selectedDevice >= len(m.omemoDevices) {
+		return OMEMODeviceInfo{}, 0, false
+	}
+	return m.omemoDevices[m.selectedDevice], m.selectedDevice, true
 }
 
 // ShowSubscription shows subscription request dialog
@@ -1068,6 +1102,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
+		// Handle OMEMO devices dialog
+		if m.dialogType == DialogOMEMODevices {
+			switch msg.String() {
+			case "j", "down":
+				if m.selectedDevice < len(m.omemoDevices)-1 {
+					m.selectedDevice++
+				}
+				return m, nil
+			case "k", "up":
+				if m.selectedDevice > 0 {
+					m.selectedDevice--
+				}
+				return m, nil
+			}
+		}
+
 		// Handle number keys 1-9 for button selection (when not in input fields)
 		if len(m.inputs) == 0 || m.dialogType == DialogRegisterSuccess {
 			if keyStr >= "1" && keyStr <= "9" {
@@ -1348,6 +1398,35 @@ func (m Model) View() string {
 				b.WriteString("\n")
 			}
 			b.WriteString("\n")
+		}
+	}
+
+	// OMEMO Devices list
+	if m.dialogType == DialogOMEMODevices && len(m.omemoDevices) > 0 {
+		b.WriteString("Devices (j/k to select):\n\n")
+		for i, dev := range m.omemoDevices {
+			prefix := "  "
+			if i == m.selectedDevice {
+				prefix = "> "
+			}
+
+			trustStyle := m.styles.PresenceOffline
+			switch dev.TrustLevel {
+			case 2:
+				trustStyle = m.styles.PresenceOnline
+			case 1:
+				trustStyle = m.styles.PresenceAway
+			case 3:
+				trustStyle = m.styles.PresenceDND
+			}
+
+			line := prefix + "Device " + strconv.FormatUint(uint64(dev.DeviceID), 10) + " [" + trustStyle.Render(dev.TrustString) + "]"
+			b.WriteString(m.styles.DialogContent.Render(line))
+			b.WriteString("\n")
+
+			fpLine := "   " + dev.Fingerprint
+			b.WriteString(m.styles.DialogContent.Render(fpLine))
+			b.WriteString("\n\n")
 		}
 	}
 

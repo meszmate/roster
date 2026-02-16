@@ -305,6 +305,26 @@ func GenerateDeviceID() uint32 {
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 }
 
+const (
+	TrustUndecided = 0
+	TrustTrusted   = 1
+	TrustVerified  = 2
+	TrustUntrusted = 3
+)
+
+func TrustLevelString(level int) string {
+	switch level {
+	case TrustTrusted:
+		return "trusted"
+	case TrustVerified:
+		return "verified"
+	case TrustUntrusted:
+		return "untrusted"
+	default:
+		return "undecided"
+	}
+}
+
 func (s *OMEMOStore) GetFingerprint() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -340,14 +360,75 @@ func (s *OMEMOStore) GetRemoteIdentitiesForJID(jid string) []RemoteIdentity {
 	var identities []RemoteIdentity
 	for addr, key := range s.remoteKeys {
 		if addr.JID == jid {
+			trustLevel := TrustUndecided
+			if s.db != nil {
+				var trust int
+				err := s.db.QueryRow(`
+					SELECT trust_level FROM omemo_remote_identities 
+					WHERE account_jid = ? AND jid = ? AND device_id = ?`,
+					s.jid, jid, addr.DeviceID).Scan(&trust)
+				if err == nil {
+					trustLevel = trust
+				}
+			}
 			identities = append(identities, RemoteIdentity{
 				DeviceID:    addr.DeviceID,
 				IdentityKey: []byte(key),
-				TrustLevel:  1,
+				TrustLevel:  trustLevel,
 			})
 		}
 	}
 	return identities
+}
+
+func (s *OMEMOStore) SetTrustLevel(jid string, deviceID uint32, level int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.db != nil {
+		_, err := s.db.Exec(`
+			UPDATE omemo_remote_identities 
+			SET trust_level = ? 
+			WHERE account_jid = ? AND jid = ? AND device_id = ?`,
+			level, s.jid, jid, deviceID)
+		return err
+	}
+	return nil
+}
+
+func (s *OMEMOStore) GetTrustLevel(jid string, deviceID uint32) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.db != nil {
+		var trust int
+		err := s.db.QueryRow(`
+			SELECT trust_level FROM omemo_remote_identities 
+			WHERE account_jid = ? AND jid = ? AND device_id = ?`,
+			s.jid, jid, deviceID).Scan(&trust)
+		if err == nil {
+			return trust
+		}
+	}
+	return TrustUndecided
+}
+
+func (s *OMEMOStore) DeleteDevice(jid string, deviceID uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	addr := cryptoomemo.Address{JID: jid, DeviceID: deviceID}
+	delete(s.remoteKeys, addr)
+	delete(s.sessions, addr)
+
+	if s.db != nil {
+		_, err := s.db.Exec(`
+			DELETE FROM omemo_remote_identities 
+			WHERE account_jid = ? AND jid = ? AND device_id = ?`,
+			s.jid, jid, deviceID)
+		return err
+	}
+	return nil
 }
 
 func (s *OMEMOStore) GetAllRemoteIdentities() map[string][]RemoteIdentity {

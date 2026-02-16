@@ -977,8 +977,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionVerifyFingerprint:
 		// Show fingerprint verification dialog (in contact details view)
 		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
-			fingerprints := m.app.GetContactFingerprints(m.detailContactJID)
-			m.dialog = m.dialog.ShowFingerprint(m.detailContactJID, fingerprints)
+			devices := m.app.GetContactFingerprintDetails(m.detailContactJID)
+			var dialogDevices []dialogs.OMEMODeviceInfo
+			for _, d := range devices {
+				dialogDevices = append(dialogDevices, dialogs.OMEMODeviceInfo{
+					DeviceID:    d.DeviceID,
+					Fingerprint: d.Fingerprint,
+					TrustLevel:  d.TrustLevel,
+					TrustString: d.TrustString,
+				})
+			}
+			m.dialog = m.dialog.ShowOMEMODevices(m.detailContactJID, dialogDevices)
 			m.focus = FocusDialog
 		}
 
@@ -2036,6 +2045,20 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 			return m.app.ExecuteCommand("connect", []string{jid})
 		}
 		// Button 3 = "Close" - just close dialog (handled by default)
+	case dialogs.DialogOMEMODevices:
+		jid := result.Values["jid"]
+		if device, _, ok := m.dialog.GetSelectedOMEMODevice(); ok && jid != "" {
+			switch result.Button {
+			case 0:
+				_ = m.app.SetOMEMOTrust(jid, device.DeviceID, 1)
+			case 1:
+				_ = m.app.SetOMEMOTrust(jid, device.DeviceID, 2)
+			case 2:
+				_ = m.app.SetOMEMOTrust(jid, device.DeviceID, 3)
+			case 3:
+				_ = m.app.DeleteOMEMODevice(jid, device.DeviceID)
+			}
+		}
 	}
 
 	m.focus = FocusRoster

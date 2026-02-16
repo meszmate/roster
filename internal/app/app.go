@@ -2094,6 +2094,79 @@ func (a *App) GetOwnFingerprint(accountJID string) (string, uint32) {
 	return fp, deviceID
 }
 
+// GetContactFingerprintDetails returns detailed OMEMO device info for a contact
+func (a *App) GetContactFingerprintDetails(contactJID string) []OMEMODeviceInfo {
+	a.mu.RLock()
+	currentAccount := a.currentAccount
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if currentAccount == "" || c == nil {
+		return nil
+	}
+
+	store := c.OMEMOStore()
+	if store == nil {
+		return nil
+	}
+
+	identities := store.GetRemoteIdentitiesForJID(contactJID)
+	var devices []OMEMODeviceInfo
+	for _, id := range identities {
+		devices = append(devices, OMEMODeviceInfo{
+			DeviceID:    id.DeviceID,
+			Fingerprint: formatFingerprint(id.IdentityKey),
+			TrustLevel:  id.TrustLevel,
+			TrustString: trustLevelString(id.TrustLevel),
+		})
+	}
+	return devices
+}
+
+// OMEMODeviceInfo represents info about an OMEMO device
+type OMEMODeviceInfo struct {
+	DeviceID    uint32
+	Fingerprint string
+	TrustLevel  int
+	TrustString string
+}
+
+// SetOMEMOTrust sets the trust level for a contact's device
+func (a *App) SetOMEMOTrust(contactJID string, deviceID uint32, trustLevel int) error {
+	a.mu.RLock()
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if c == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	store := c.OMEMOStore()
+	if store == nil {
+		return fmt.Errorf("OMEMO not available")
+	}
+
+	return store.SetTrustLevel(contactJID, deviceID, trustLevel)
+}
+
+// DeleteOMEMODevice removes a device from the OMEMO store
+func (a *App) DeleteOMEMODevice(contactJID string, deviceID uint32) error {
+	a.mu.RLock()
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if c == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	store := c.OMEMOStore()
+	if store == nil {
+		return fmt.Errorf("OMEMO not available")
+	}
+
+	return store.DeleteDevice(contactJID, deviceID)
+}
+
 // IsStatusSharingEnabled checks if status sharing is enabled for a contact
 func (a *App) IsStatusSharingEnabled(contactJID string) bool {
 	a.mu.RLock()
