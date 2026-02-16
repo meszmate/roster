@@ -2,22 +2,15 @@ module github.com/meszmate/roster
 
 go 1.25.0
 
-replace github.com/meszmate/xmpp-go => ../xmpp-go
-
-replace github.com/meszmate/xmpp-go/crypto/omemo => ../xmpp-go/crypto/omemo
-
 require (
 	github.com/BurntSushi/toml v1.4.0
 	github.com/charmbracelet/bubbletea v1.1.0
 	github.com/charmbracelet/lipgloss v1.0.0
 	github.com/hashicorp/go-plugin v1.6.2
 	github.com/mattn/go-sqlite3 v1.14.24
-	github.com/meszmate/xmpp-go v0.0.0
-	github.com/meszmate/xmpp-go/crypto/omemo v0.0.0
-	golang.org/x/crypto v0.47.0
+	github.com/meszmate/xmpp-go v0.0.0-20260210123917-3d0374d2558b
+	github.com/meszmate/xmpp-go/crypto/omemo v0.0.0-20260210123917-3d0374d2558b
 	google.golang.org/grpc v1.68.0
-	mellium.im/sasl v0.3.2
-	mellium.im/xmpp v0.22.0
 )
 
 require (
@@ -39,14 +32,11 @@ require (
 	github.com/muesli/termenv v0.15.2 // indirect
 	github.com/oklog/run v1.0.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	golang.org/x/mod v0.31.0 // indirect
+	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
-	golang.org/x/tools v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/protobuf v1.35.2 // indirect
-	mellium.im/reader v0.1.0 // indirect
-	mellium.im/xmlstream v0.15.4 // indirect
 )
