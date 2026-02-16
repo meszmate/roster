@@ -1721,6 +1721,7 @@ func (a *App) syncMAMForChats(accountJID string, client *client.Client) {
 
 		a.sendEvent(EventMsg{Type: EventMAMSyncing})
 	}
+}
 
 func (a *App) CompleteOperation(op dialogs.OperationType) {
 	a.pendingOpsMu.Lock()
@@ -1750,13 +1751,6 @@ func (a *App) RegisterOperation(op dialogs.OperationType, cancel context.CancelF
 	a.pendingOpsMu.Lock()
 	defer a.pendingOpsMu.Unlock()
 	a.pendingOps[op] = cancel
-}
-
-// CompleteOperation marks an operation as complete (removes from pending)
-func (a *App) CompleteOperation(op dialogs.OperationType) {
-	a.pendingOpsMu.Lock()
-	defer a.pendingOpsMu.Unlock()
-	delete(a.pendingOps, op)
 }
 
 // DoJoinRoom joins a room asynchronously and returns a tea.Cmd

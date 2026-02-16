@@ -612,3 +612,49 @@ func (d *DB) SaveMessageWithStanzaID(account, jid, id, stanzaID, body, msgType s
 	`, id, stanzaID, account, jid, body, timestamp.Unix(), outgoing, encrypted, msgType)
 	return err
 }
+
+type MAMSync struct {
+	Account       string
+	JID           string
+	LastStanzaID  string
+	LastTimestamp int64
+	LastSynced    int64
+}
+
+func (d *DB) GetMAMSync(account, jid string) (*MAMSync, error) {
+	var sync MAMSync
+	err := d.db.QueryRow(`
+		SELECT account, jid, last_stanza_id, last_timestamp, last_synced
+		FROM mam_sync
+		WHERE account = ? AND jid = ?
+	`, account, jid).Scan(&sync.Account, &sync.JID, &sync.LastStanzaID, &sync.LastTimestamp, &sync.LastSynced)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &sync, err
+}
+
+func (d *DB) SaveMAMSync(sync MAMSync) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO mam_sync (account, jid, last_stanza_id, last_timestamp, last_synced)
+		VALUES (?, ?, ?, ?, ?)
+	`, sync.Account, sync.JID, sync.LastStanzaID, sync.LastTimestamp, time.Now().Unix())
+	return err
+}
+
+func (d *DB) DeleteMAMSync(account, jid string) error {
+	_, err := d.db.Exec(`
+		DELETE FROM mam_sync
+		WHERE account = ? AND jid = ?
+	`, account, jid)
+	return err
+}
+
+func (d *DB) MessageExists(stanzaID string) (bool, error) {
+	var exists bool
+	err := d.db.QueryRow("SELECT 1 FROM messages WHERE stanza_id = ?", stanzaID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return exists, err
+}

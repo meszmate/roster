@@ -21,6 +21,8 @@ import (
 	"github.com/meszmate/xmpp-go/plugins/chatstates"
 	"github.com/meszmate/xmpp-go/plugins/correction"
 	"github.com/meszmate/xmpp-go/plugins/disco"
+	"github.com/meszmate/xmpp-go/plugins/form"
+	mamplugin "github.com/meszmate/xmpp-go/plugins/mam"
 	"github.com/meszmate/xmpp-go/plugins/muc"
 	omemoplugin "github.com/meszmate/xmpp-go/plugins/omemo"
 	"github.com/meszmate/xmpp-go/plugins/ping"
@@ -184,6 +186,7 @@ func (c *Client) Connect() error {
 		reactions.New(),
 		upload.New(),
 		caps.New("https://github.com/meszmate/roster"),
+		mamplugin.New(),
 		ping.New(),
 		presence.New(),
 		omemoplugin.New(c.deviceID),
@@ -265,6 +268,13 @@ func (c *Client) handleStanza(ctx context.Context, session *xmpp.Session, st sta
 }
 
 func (c *Client) handleMessage(msg *stanza.Message) {
+	for _, ext := range msg.Extensions {
+		if ext.XMLName.Space == "urn:xmpp:mam:2" && ext.XMLName.Local == "result" {
+			c.handleMAMResult(msg)
+			return
+		}
+	}
+
 	if c.onMessage == nil {
 		return
 	}
@@ -802,6 +812,96 @@ func (c *Client) GetRosterItems() ([]RosterItem, error) {
 	}
 
 	return rosterItems, nil
+}
+
+func (c *Client) QueryMAM(jid, afterID string) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	c.mu.RUnlock()
+
+	accountBare := c.jid.Bare()
+	queryID := generateID()
+
+	iq := stanza.NewIQ(stanza.IQSet)
+	iq.ID = queryID
+	iq.To = accountBare
+
+	formData := &form.Form{
+		Type: form.TypeSubmit,
+		Fields: []form.Field{
+			{
+				Var:    "FORM_TYPE",
+				Type:   form.FieldHidden,
+				Values: []string{"urn:xmpp:mam:2"},
+			},
+			{
+				Var:    "with",
+				Type:   form.FieldJIDSingle,
+				Values: []string{jid},
+			},
+		},
+	}
+
+	if afterID != "" {
+		formData.Fields = append(formData.Fields, form.Field{
+			Var:    "after-id",
+			Type:   form.FieldTextSingle,
+			Values: []string{afterID},
+		})
+	}
+
+	formBytes, _ := xml.Marshal(formData)
+
+	query := &mamplugin.Query{
+		XMLName: xml.Name{Space: "urn:xmpp:mam:2", Local: "query"},
+		QueryID: queryID,
+		Form:    formBytes,
+	}
+
+	queryData, _ := xml.Marshal(query)
+	iq.Query = queryData
+
+	return c.session.SendElement(c.ctx, iq)
+}
+
+func (c *Client) handleMAMResult(msg *stanza.Message) {
+	for _, ext := range msg.Extensions {
+		if ext.XMLName.Space == "urn:xmpp:mam:2" && ext.XMLName.Local == "result" {
+			result := &mamplugin.Result{}
+			if err := xml.Unmarshal(ext.Inner, result); err != nil {
+				continue
+			}
+
+			forwarded := struct {
+				XMLName xml.Name `xml:"urn:xmpp:forward:0 forwarded"`
+				Delay   *struct {
+					XMLName xml.Name `xml:"urn:xmpp:delay delay"`
+					Stamp   string   `xml:"stamp,attr"`
+				} `xml:"urn:xmpp:delay delay,omitempty"`
+				Inner []byte `xml:",innerxml"`
+			}{}
+
+			if err := xml.Unmarshal(result.Forwarded, &forwarded); err != nil {
+				continue
+			}
+
+			var forwardedMsg stanza.Message
+			if err := xml.Unmarshal(forwarded.Inner, &forwardedMsg); err != nil {
+				continue
+			}
+
+			c.handleMessage(&forwardedMsg)
+		}
+	}
+}
+
+func generateID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
 }
 
 var _ transport.Transport = (*transport.TCP)(nil)
