@@ -180,6 +180,7 @@ const (
 	ActionOpenFileURL
 	ActionCopyFileURL
 	ActionCorrectMessage
+	ActionAddReaction
 )
 
 // KeyBinding represents a key binding
@@ -310,6 +311,7 @@ func (m *Manager) setupDefaultBindings() {
 		"gp": ActionShowParticipants, // 'g' prefix + 'p' for participants
 		"gb": ActionShowBookmarks,    // 'g' prefix + 'b' for bookmarks
 		"cc": ActionCorrectMessage,   // 'c' prefix + 'c' for correct last message
+		"cr": ActionAddReaction,      // 'c' prefix + 'r' for add reaction
 
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings

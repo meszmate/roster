@@ -1075,6 +1075,22 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.focus = FocusDialog
 			}
 		}
+
+	case keybindings.ActionAddReaction:
+		if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			jid := m.windows.ActiveJID()
+			lastMsg := m.chat.SelectedMessage()
+			var msgID string
+			if lastMsg != nil && lastMsg.ID != "" {
+				msgID = lastMsg.ID
+			} else {
+				msgID = m.chat.GetLastOutgoingMessageID()
+			}
+			if msgID != "" {
+				m.dialog = m.dialog.ShowReactions(jid, msgID)
+				m.focus = FocusDialog
+			}
+		}
 	}
 
 	return nil
@@ -1436,15 +1452,24 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 				Outgoing:    msg.Outgoing,
 				Status:      chat.MessageStatus(msg.Status),
 				CorrectedID: msg.CorrectedID,
+				Reactions:   msg.Reactions,
 			}
 			if chatMsg.CorrectedID != "" {
 				m.chat = m.chat.CorrectMessage(chatMsg.CorrectedID, chatMsg.Body)
+			} else if len(chatMsg.Reactions) > 0 {
+				for from, reaction := range chatMsg.Reactions {
+					m.chat = m.chat.AddReaction(chatMsg.ID, from, reaction)
+				}
 			} else {
 				m.chat = m.chat.AddMessage(chatMsg)
 			}
 		case chat.Message:
 			if msg.CorrectedID != "" {
 				m.chat = m.chat.CorrectMessage(msg.CorrectedID, msg.Body)
+			} else if len(msg.Reactions) > 0 {
+				for from, reaction := range msg.Reactions {
+					m.chat = m.chat.AddReaction(msg.ID, from, reaction)
+				}
 			} else {
 				m.chat = m.chat.AddMessage(msg)
 			}
@@ -2138,6 +2163,18 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 			correction := result.Values["correction"]
 			if jid != "" && originalID != "" && correction != "" {
 				return m.app.CorrectMessage(jid, originalID, correction)
+			}
+		}
+
+	case dialogs.DialogReactions:
+		reactions := []string{"👍", "👎", "❤️", "😂", "😮", "😢", "🙏", "🔥"}
+		if result.Button < len(reactions) {
+			jid := result.Values["jid"]
+			messageID := result.Values["message_id"]
+			reaction := reactions[result.Button]
+			if jid != "" && messageID != "" {
+				_ = m.app.SendReaction(jid, messageID, reaction)
+				m.chat = m.chat.AddReaction(messageID, m.app.CurrentAccount(), reaction)
 			}
 		}
 	}

@@ -41,6 +41,7 @@ const (
 	DialogBookmarks
 	DialogSetStatus
 	DialogCorrectMessage
+	DialogReactions
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -342,7 +343,18 @@ func (m Model) ShowCorrectMessage(jid, originalID, originalBody string) Model {
 	return m
 }
 
-// ShowSubscription shows subscription request dialog
+func (m Model) ShowReactions(jid, messageID string) Model {
+	m.dialogType = DialogReactions
+	m.title = "Add Reaction"
+	m.message = "Select a reaction to send:"
+	m.buttons = []string{"👍", "👎", "❤️", "😂", "😮", "😢", "🙏", "🔥", "Cancel"}
+	m.activeBtn = 0
+	m.inputs = nil
+	m.data["jid"] = jid
+	m.data["message_id"] = messageID
+	return m
+}
+
 func (m Model) ShowSubscription(jid string) Model {
 	m.dialogType = DialogSubscription
 	m.title = "Subscription Request"

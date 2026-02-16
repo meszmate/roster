@@ -45,10 +45,11 @@ type Message struct {
 	Timestamp   time.Time
 	Encrypted   bool
 	Read        bool
-	Type        string // chat, groupchat, system
+	Type        string
 	Outgoing    bool
-	Status      MessageStatus // Delivery status for outgoing messages
+	Status      MessageStatus
 	CorrectedID string
+	Reactions   map[string]string
 
 	FileURL  string
 	FileName string
@@ -397,6 +398,42 @@ func (m Model) SelectedMessage() *Message {
 		return &m.messages[m.selectedMsg]
 	}
 	return nil
+}
+
+func (m Model) AddReaction(msgID, from, reaction string) Model {
+	for i, msg := range m.messages {
+		if msg.ID == msgID {
+			if m.messages[i].Reactions == nil {
+				m.messages[i].Reactions = make(map[string]string)
+			}
+			m.messages[i].Reactions[from] = reaction
+			break
+		}
+	}
+	return m
+}
+
+func (m Model) GetMessageByID(msgID string) *Message {
+	for i := range m.messages {
+		if m.messages[i].ID == msgID {
+			return &m.messages[i]
+		}
+	}
+	return nil
+}
+
+func (m Model) SelectNextMessage() Model {
+	if m.selectedMsg < len(m.messages)-1 {
+		m.selectedMsg++
+	}
+	return m
+}
+
+func (m Model) SelectPrevMessage() Model {
+	if m.selectedMsg > 0 {
+		m.selectedMsg--
+	}
+	return m
 }
 
 // SelectNextFileMessage selects the next message that contains a file
@@ -772,6 +809,21 @@ func (m Model) renderMessage(msg Message) []string {
 			formatted = padding + bodyStyle.Render(line)
 		}
 		lines = append(lines, formatted)
+	}
+
+	if len(msg.Reactions) > 0 {
+		var reactionEmojis []string
+		seenReactions := make(map[string]bool)
+		for _, r := range msg.Reactions {
+			if !seenReactions[r] {
+				reactionEmojis = append(reactionEmojis, r)
+				seenReactions[r] = true
+			}
+		}
+		if len(reactionEmojis) > 0 {
+			reactionsLine := strings.Repeat(" ", 8) + m.styles.ChatSystem.Render(strings.Join(reactionEmojis, " "))
+			lines = append(lines, reactionsLine)
+		}
 	}
 
 	return lines

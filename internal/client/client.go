@@ -77,6 +77,7 @@ type Message struct {
 	Thread      string
 	Encrypted   bool
 	CorrectedID string
+	Reactions   map[string][]string
 }
 
 type Presence struct {
@@ -298,6 +299,19 @@ func (c *Client) handleMessage(msg *stanza.Message) {
 			var replace correction.Replace
 			if err := xml.Unmarshal(ext.Inner, &replace); err == nil {
 				m.CorrectedID = replace.ID
+			}
+		}
+		if ext.XMLName.Space == "urn:xmpp:reactions:0" && ext.XMLName.Local == "reactions" {
+			var react reactions.Reactions
+			if err := xml.Unmarshal(ext.Inner, &react); err == nil {
+				if m.Reactions == nil {
+					m.Reactions = make(map[string][]string)
+				}
+				var reactionValues []string
+				for _, r := range react.Items {
+					reactionValues = append(reactionValues, r.Value)
+				}
+				m.Reactions[react.ID] = reactionValues
 			}
 		}
 	}
@@ -931,6 +945,39 @@ func (c *Client) CorrectMessage(to, originalID, newBody string) (string, error) 
 	}
 
 	return id, nil
+}
+
+func (c *Client) SendReaction(to, messageID, reaction string) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	toJID, err := jid.Parse(to)
+	if err != nil {
+		return fmt.Errorf("invalid JID: %w", err)
+	}
+
+	msg := stanza.NewMessage(stanza.MessageChat)
+	msg.To = toJID
+	msg.ID = stanza.GenerateID()
+
+	react := &reactions.Reactions{
+		ID: messageID,
+		Items: []reactions.Reaction{
+			{Value: reaction},
+		},
+	}
+	reactData, _ := xml.Marshal(react)
+	msg.Extensions = append(msg.Extensions, stanza.Extension{
+		XMLName: xml.Name{Space: "urn:xmpp:reactions:0", Local: "reactions"},
+		Inner:   reactData,
+	})
+
+	return session.Send(c.ctx, msg)
 }
 
 func (c *Client) QueryMAM(jid, afterID string) error {

@@ -69,6 +69,7 @@ type ChatMessage struct {
 	Outgoing    bool
 	Status      MessageStatus
 	CorrectedID string
+	Reactions   map[string]string
 }
 
 // MessageStatusUpdateMsg is sent when a message status changes
@@ -731,6 +732,42 @@ func (a *App) CorrectMessageInHistory(to, originalID, newBody string) {
 		Data: chat.Message{
 			Body:        newBody,
 			CorrectedID: originalID,
+		},
+	})
+}
+
+func (a *App) SendReaction(to, messageID, reaction string) error {
+	a.mu.RLock()
+	client := a.clients[a.currentAccount]
+	a.mu.RUnlock()
+
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	return client.SendReaction(to, messageID, reaction)
+}
+
+func (a *App) AddReactionToHistory(contactJID, msgID, from, reaction string) {
+	a.mu.Lock()
+	if messages, ok := a.chatHistory[contactJID]; ok {
+		for i, msg := range messages {
+			if msg.ID == msgID {
+				if a.chatHistory[contactJID][i].Reactions == nil {
+					a.chatHistory[contactJID][i].Reactions = make(map[string]string)
+				}
+				a.chatHistory[contactJID][i].Reactions[from] = reaction
+				break
+			}
+		}
+	}
+	a.mu.Unlock()
+
+	a.sendEvent(EventMsg{
+		Type: EventMessage,
+		Data: chat.Message{
+			ID:        msgID,
+			Reactions: map[string]string{from: reaction},
 		},
 	})
 }
@@ -1438,6 +1475,12 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			contactJID := msg.From.Bare().String()
 			if chatMsg.CorrectedID != "" {
 				a.CorrectMessageInHistory(contactJID, chatMsg.CorrectedID, chatMsg.Body)
+			} else if len(msg.Reactions) > 0 {
+				for targetMsgID, reactions := range msg.Reactions {
+					for _, reaction := range reactions {
+						a.AddReactionToHistory(contactJID, targetMsgID, msg.From.String(), reaction)
+					}
+				}
 			} else {
 				a.AddChatMessage(contactJID, chatMsg)
 				a.IncrementContactUnread(jidStr, contactJID)
