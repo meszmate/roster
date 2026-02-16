@@ -1112,6 +1112,14 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.keys.SetMode(keybindings.ModeInsert)
 			}
 		}
+
+	case keybindings.ActionExportAccounts:
+		m.dialog = m.dialog.ShowExportAccounts()
+		m.focus = FocusDialog
+
+	case keybindings.ActionImportAccounts:
+		m.dialog = m.dialog.ShowImportAccounts()
+		m.focus = FocusDialog
 	}
 
 	return nil
@@ -2231,6 +2239,45 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 					m.uploadFile(jid, filepath),
 					func() tea.Msg { return nil },
 				)
+			}
+		}
+
+	case dialogs.DialogExportAccounts:
+		if result.Confirmed {
+			filepath := result.Values["filepath"]
+			if filepath != "" {
+				data, err := m.app.ExportAccounts()
+				if err != nil {
+					m.dialog = m.dialog.ShowError("Failed to export: " + err.Error())
+					m.focus = FocusDialog
+					return nil
+				}
+				if err := os.WriteFile(filepath, data, 0600); err != nil {
+					m.dialog = m.dialog.ShowError("Failed to write file: " + err.Error())
+					m.focus = FocusDialog
+					return nil
+				}
+				m.chat = m.chat.SetStatusMsg("Accounts exported to " + filepath)
+			}
+		}
+
+	case dialogs.DialogImportAccounts:
+		if result.Confirmed {
+			filepath := result.Values["filepath"]
+			if filepath != "" {
+				data, err := os.ReadFile(filepath)
+				if err != nil {
+					m.dialog = m.dialog.ShowError("Failed to read file: " + err.Error())
+					m.focus = FocusDialog
+					return nil
+				}
+				if err := m.app.ImportAccounts(data); err != nil {
+					m.dialog = m.dialog.ShowError("Failed to import: " + err.Error())
+					m.focus = FocusDialog
+					return nil
+				}
+				m.chat = m.chat.SetStatusMsg("Accounts imported from " + filepath)
+				m.roster = m.roster.SetAccounts(m.getAccountDisplays())
 			}
 		}
 	}

@@ -183,6 +183,8 @@ const (
 	ActionAddReaction
 	ActionUploadFile
 	ActionSearchContacts
+	ActionExportAccounts
+	ActionImportAccounts
 )
 
 // KeyBinding represents a key binding
@@ -316,6 +318,8 @@ func (m *Manager) setupDefaultBindings() {
 		"cr": ActionAddReaction,      // 'c' prefix + 'r' for add reaction
 		"cf": ActionUploadFile,       // 'c' prefix + 'f' for upload file
 		"f":  ActionSearchContacts,   // 'f' for filter/search contacts
+		"ge": ActionExportAccounts,   // 'g' prefix + 'e' for export accounts
+		"gI": ActionImportAccounts,   // 'g' prefix + 'I' (capital) for import accounts
 
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings

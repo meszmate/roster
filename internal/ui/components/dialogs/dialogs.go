@@ -43,6 +43,8 @@ const (
 	DialogCorrectMessage
 	DialogReactions
 	DialogUploadFile
+	DialogExportAccounts
+	DialogImportAccounts
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -368,6 +370,34 @@ func (m Model) ShowUploadFile(jid string) Model {
 	m.activeInput = 0
 	m.inCheckboxes = false
 	m.data["jid"] = jid
+	return m
+}
+
+func (m Model) ShowExportAccounts() Model {
+	m.dialogType = DialogExportAccounts
+	m.title = "Export Accounts"
+	m.message = "Enter file path to export accounts:"
+	m.inputs = []DialogInput{
+		{Label: "File path", Key: "filepath", Value: ""},
+	}
+	m.buttons = []string{"Export", "Cancel"}
+	m.activeBtn = 0
+	m.activeInput = 0
+	m.inCheckboxes = false
+	return m
+}
+
+func (m Model) ShowImportAccounts() Model {
+	m.dialogType = DialogImportAccounts
+	m.title = "Import Accounts"
+	m.message = "Enter file path to import accounts:"
+	m.inputs = []DialogInput{
+		{Label: "File path", Key: "filepath", Value: ""},
+	}
+	m.buttons = []string{"Import", "Cancel"}
+	m.activeBtn = 0
+	m.activeInput = 0
+	m.inCheckboxes = false
 	return m
 }
 

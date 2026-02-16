@@ -788,6 +788,68 @@ func (a *App) SendFileMessage(to, getURL string) tea.Cmd {
 	return a.SendChatMessage(to, getURL)
 }
 
+func (a *App) ExportAccounts() ([]byte, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	export := make([]map[string]interface{}, 0)
+	for _, acc := range a.accounts.Accounts {
+		if !acc.Session {
+			export = append(export, map[string]interface{}{
+				"jid":          acc.JID,
+				"server":       acc.Server,
+				"port":         acc.Port,
+				"resource":     acc.Resource,
+				"auto_connect": acc.AutoConnect,
+				"omemo":        acc.OMEMO,
+			})
+		}
+	}
+
+	return json.MarshalIndent(export, "", "  ")
+}
+
+func (a *App) ImportAccounts(data []byte) error {
+	var accounts []map[string]interface{}
+	if err := json.Unmarshal(data, &accounts); err != nil {
+		return fmt.Errorf("invalid import format: %w", err)
+	}
+
+	for _, accData := range accounts {
+		jid, ok := accData["jid"].(string)
+		if !ok || jid == "" {
+			continue
+		}
+
+		password, _ := accData["password"].(string)
+		server, _ := accData["server"].(string)
+		resource, _ := accData["resource"].(string)
+		autoConnect, _ := accData["auto_connect"].(bool)
+		omemo := true
+		if v, ok := accData["omemo"].(bool); ok {
+			omemo = v
+		}
+
+		port := 5222
+		if v, ok := accData["port"].(float64); ok {
+			port = int(v)
+		}
+
+		acc := config.Account{
+			JID:         jid,
+			Password:    password,
+			Server:      server,
+			Port:        port,
+			Resource:    resource,
+			AutoConnect: autoConnect,
+			OMEMO:       omemo,
+		}
+		a.AddAccount(acc)
+	}
+
+	return nil
+}
+
 // ExecuteCommand executes a command
 func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 	return func() tea.Msg {
