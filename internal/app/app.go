@@ -35,6 +35,7 @@ const (
 	EventMUCLeft
 	EventMUCMessage
 	EventTyping
+	EventMAMSyncing
 	EventReceipt
 )
 
@@ -1325,6 +1326,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		// Set up handlers
 		newClient.SetConnectHandler(func() {
 			a.sendEvent(EventMsg{Type: EventConnected})
+			go a.syncMAMForChats(jidStr, newClient)
 		})
 
 		newClient.SetDisconnectHandler(func(err error) {
@@ -1686,6 +1688,44 @@ func (a *App) CancelOperation(op dialogs.OperationType) {
 		cancel()
 		delete(a.pendingOps, op)
 	}
+}
+
+func (a *App) syncMAMForChats(accountJID string, client *client.Client) {
+	if a.storage == nil {
+		return
+	}
+
+	a.mu.RLock()
+	uniqueJIDs := make(map[string]bool)
+	for jid, messages := range a.chatHistory {
+		if len(messages) > 0 {
+			uniqueJIDs[jid] = true
+		}
+	}
+	a.mu.RUnlock()
+
+	for jid := range uniqueJIDs {
+		sync, err := a.storage.GetMAMSync(accountJID, jid)
+		if err != nil {
+			return
+		}
+
+		var afterID string
+		if sync != nil && sync.LastStanzaID != "" {
+			afterID = sync.LastStanzaID
+		}
+
+		if err := client.QueryMAM(jid, afterID); err != nil {
+			return
+		}
+
+		a.sendEvent(EventMsg{Type: EventMAMSyncing})
+	}
+
+func (a *App) CompleteOperation(op dialogs.OperationType) {
+	a.pendingOpsMu.Lock()
+	defer a.pendingOpsMu.Unlock()
+	delete(a.pendingOps, op)
 }
 
 // OperationTimeout returns a command that sends a timeout message after the specified duration

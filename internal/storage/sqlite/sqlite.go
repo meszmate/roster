@@ -605,6 +605,10 @@ func (d *DB) GetContactsWithStatusSharing(account string) ([]string, error) {
 	return contacts, nil
 }
 
-func (d *DB) DB() *sql.DB {
-	return d.db
+func (d *DB) SaveMessageWithStanzaID(account, jid, id, stanzaID, body, msgType string, timestamp time.Time, outgoing, encrypted bool) error {
+	_, err := d.db.Exec(`
+		INSERT OR IGNORE INTO messages (id, stanza_id, account, jid, body, timestamp, outgoing, encrypted, type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, stanzaID, account, jid, body, timestamp.Unix(), outgoing, encrypted, msgType)
+	return err
 }
