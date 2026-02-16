@@ -27,7 +27,9 @@ type Model struct {
 	styles        *theme.Styles
 	extraInfo     string
 	windows       []WindowInfo
-	windowAccount string // Account bound to current window
+	windowAccount string
+	syncing       bool
+	syncProgress  string
 }
 
 // New creates a new status bar model
@@ -87,6 +89,13 @@ func (m Model) SetWindowAccount(acc string) Model {
 	return m
 }
 
+// SetSyncing sets the MAM sync state
+func (m Model) SetSyncing(syncing bool, progress string) Model {
+	m.syncing = syncing
+	m.syncProgress = progress
+	return m
+}
+
 // View renders the status bar
 func (m Model) View() string {
 	if m.width == 0 {
@@ -114,6 +123,12 @@ func (m Model) View() string {
 	extra := ""
 	if m.extraInfo != "" {
 		extra = " | " + m.extraInfo
+	}
+
+	// Sync indicator
+	syncIndicator := ""
+	if m.syncing {
+		syncIndicator = m.styles.PresenceAway.Render(" [Syncing" + m.syncProgress + "...]")
 	}
 
 	// Window indicators
@@ -186,7 +201,7 @@ func (m Model) View() string {
 	}
 
 	// Build left and right parts
-	left := fmt.Sprintf(" %s%s", modeText, accountSection)
+	left := fmt.Sprintf(" %s%s%s", modeText, accountSection, syncIndicator)
 	right := windowsStr + extra + " "
 
 	// Calculate padding

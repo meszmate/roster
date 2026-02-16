@@ -1706,10 +1706,16 @@ func (a *App) syncMAMForChats(accountJID string, client *client.Client) {
 	}
 	a.mu.RUnlock()
 
+	if len(uniqueJIDs) == 0 {
+		return
+	}
+
+	a.sendEvent(EventMsg{Type: EventMAMSyncing, Data: true})
+
 	for jid := range uniqueJIDs {
 		sync, err := a.storage.GetMAMSync(accountJID, jid)
 		if err != nil {
-			return
+			continue
 		}
 
 		var afterID string
@@ -1718,11 +1724,11 @@ func (a *App) syncMAMForChats(accountJID string, client *client.Client) {
 		}
 
 		if err := client.QueryMAM(jid, afterID); err != nil {
-			return
+			continue
 		}
-
-		a.sendEvent(EventMsg{Type: EventMAMSyncing})
 	}
+
+	a.sendEvent(EventMsg{Type: EventMAMSyncing, Data: false})
 }
 
 func (a *App) CompleteOperation(op dialogs.OperationType) {

@@ -1428,6 +1428,11 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 		if statusUpdate, ok := event.Data.(app.MessageStatusUpdateMsg); ok {
 			m.chat = m.chat.UpdateMessageStatus(statusUpdate.MessageID, chat.MessageStatus(statusUpdate.Status))
 		}
+
+	case app.EventMAMSyncing:
+		if syncing, ok := event.Data.(bool); ok {
+			m.statusbar = m.statusbar.SetSyncing(syncing, "")
+		}
 	}
 
 	return nil
