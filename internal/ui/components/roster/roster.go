@@ -69,14 +69,17 @@ type Model struct {
 	searchMatches  []int
 	searchIndex    int
 
-	// Account section
+	filterMode     bool
+	filterQuery    string
+	filteredRoster []Roster
+
 	accounts            []AccountDisplay
-	showAccountList     bool    // Full account list mode
-	accountSelected     int     // Selection in account section
-	accountOffset       int     // Scroll offset for accounts
-	focusSection        Section // Contacts or Accounts
-	maxVisibleAccounts  int     // Maximum visible accounts when not focused
-	maxExpandedAccounts int     // Maximum visible accounts when focused (auto-expand)
+	showAccountList     bool
+	accountSelected     int
+	accountOffset       int
+	focusSection        Section
+	maxVisibleAccounts  int
+	maxExpandedAccounts int
 }
 
 // New creates a new roster model
@@ -226,28 +229,27 @@ func (m Model) MoveToContacts() Model {
 
 // MoveUp moves the selection up
 func (m Model) MoveUp() Model {
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
 	if m.focusSection == SectionAccounts {
-		// In accounts section
 		if m.accountSelected > 0 {
 			m.accountSelected--
-			// Adjust offset to keep selection in view
 			if m.accountSelected < m.accountOffset {
 				m.accountOffset = m.accountSelected
 			}
 		} else {
-			// Move to contacts section
 			m.focusSection = SectionContacts
-			m.accountOffset = 0 // Reset offset when leaving accounts
-			if len(m.rosters) > 0 {
-				m.selected = len(m.rosters) - 1
-				// Adjust offset to show selected
+			m.accountOffset = 0
+			if len(roster) > 0 {
+				m.selected = len(roster) - 1
 				if m.selected >= m.offset+m.getContactsHeight()-2 {
 					m.offset = m.selected - m.getContactsHeight() + 3
 				}
 			}
 		}
 	} else {
-		// In contacts section
 		if m.selected > 0 {
 			m.selected--
 			if m.selected < m.offset {
@@ -258,26 +260,25 @@ func (m Model) MoveUp() Model {
 	return m
 }
 
-// MoveDown moves the selection down
 func (m Model) MoveDown() Model {
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
 	if m.focusSection == SectionContacts {
-		// In contacts section
-		if m.selected < len(m.rosters)-1 {
+		if m.selected < len(roster)-1 {
 			m.selected++
 			if m.selected >= m.offset+m.getContactsHeight()-2 {
 				m.offset = m.selected - m.getContactsHeight() + 3
 			}
 		} else if len(m.accounts) > 0 {
-			// Move to accounts section
 			m.focusSection = SectionAccounts
 			m.accountSelected = 0
 			m.accountOffset = 0
 		}
 	} else {
-		// In accounts section - allow full navigation through all accounts
 		if m.accountSelected < len(m.accounts)-1 {
 			m.accountSelected++
-			// Adjust offset to keep selection in view
 			maxVisible := m.getMaxVisibleAccounts()
 			if m.accountSelected >= m.accountOffset+maxVisible {
 				m.accountOffset = m.accountSelected - maxVisible + 1
@@ -302,7 +303,11 @@ func (m Model) MoveToTop() Model {
 
 // MoveToBottom moves selection to the bottom
 func (m Model) MoveToBottom() Model {
-	m.selected = len(m.rosters) - 1
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
+	m.selected = len(roster) - 1
 	if m.selected < 0 {
 		m.selected = 0
 	}
@@ -315,7 +320,6 @@ func (m Model) MoveToBottom() Model {
 	return m
 }
 
-// PageUp moves up by half a page
 func (m Model) PageUp() Model {
 	pageSize := m.height / 2
 	m.selected -= pageSize
@@ -329,18 +333,21 @@ func (m Model) PageUp() Model {
 	return m
 }
 
-// PageDown moves down by half a page
 func (m Model) PageDown() Model {
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
 	pageSize := m.height / 2
 	m.selected += pageSize
-	if m.selected >= len(m.rosters) {
-		m.selected = len(m.rosters) - 1
+	if m.selected >= len(roster) {
+		m.selected = len(roster) - 1
 	}
 	if m.selected < 0 {
 		m.selected = 0
 	}
 	m.offset += pageSize
-	maxOffset := len(m.rosters) - m.height + 2
+	maxOffset := len(roster) - m.height + 2
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -352,8 +359,12 @@ func (m Model) PageDown() Model {
 
 // SelectedJID returns the JID of the selected roster entry
 func (m Model) SelectedJID() string {
-	if m.selected >= 0 && m.selected < len(m.rosters) {
-		return m.rosters[m.selected].JID
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
+	if m.selected >= 0 && m.selected < len(roster) {
+		return roster[m.selected].JID
 	}
 	return ""
 }
@@ -422,7 +433,54 @@ func (m Model) findMatches(query string) []int {
 	return matches
 }
 
-// getMaxVisibleAccounts returns the max accounts to show based on focus state
+func (m Model) EnterFilterMode() Model {
+	m.filterMode = true
+	m.filterQuery = ""
+	m.filteredRoster = m.rosters
+	return m
+}
+
+func (m Model) ExitFilterMode() Model {
+	m.filterMode = false
+	m.filterQuery = ""
+	m.filteredRoster = nil
+	return m
+}
+
+func (m Model) InFilterMode() bool {
+	return m.filterMode
+}
+
+func (m Model) UpdateFilter(query string) Model {
+	m.filterQuery = query
+	if query == "" {
+		m.filteredRoster = m.rosters
+	} else {
+		m.filteredRoster = nil
+		queryLower := strings.ToLower(query)
+		for _, r := range m.rosters {
+			name := strings.ToLower(r.Name)
+			jid := strings.ToLower(r.JID)
+			if strings.Contains(name, queryLower) || strings.Contains(jid, queryLower) {
+				m.filteredRoster = append(m.filteredRoster, r)
+			}
+		}
+	}
+	if m.selected >= len(m.filteredRoster) {
+		m.selected = 0
+		m.offset = 0
+	}
+	return m
+}
+
+func (m Model) FilterQuery() string {
+	return m.filterQuery
+}
+
+func (m Model) FilteredCount() int {
+	return len(m.filteredRoster)
+}
+
 func (m Model) getMaxVisibleAccounts() int {
 	if m.focusSection == SectionAccounts {
 		return m.maxExpandedAccounts
@@ -518,20 +576,26 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Header
-	header := m.styles.RosterHeader.Width(m.width - 2).Render("Roster")
+	headerText := "Roster"
+	if m.filterMode {
+		headerText = fmt.Sprintf("Filter: %s", m.filterQuery)
+	}
+	header := m.styles.RosterHeader.Width(m.width - 2).Render(headerText)
 	b.WriteString(header)
 	b.WriteString("\n")
 
-	// Calculate visible area for contacts
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
+
 	accountSectionHeight := m.getAccountSectionHeight()
-	visibleHeight := m.height - 3 - accountSectionHeight // header + padding - accounts
+	visibleHeight := m.height - 3 - accountSectionHeight
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
 
-	// Show help message if no roster entries
-	if len(m.rosters) == 0 {
+	if len(roster) == 0 {
 		helpLines := []string{
 			"",
 			"Roster is empty",
@@ -570,50 +634,44 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 	} else {
-		// Calculate actual visible height accounting for scroll indicators
 		actualVisibleHeight := visibleHeight
 		if m.offset > 0 {
-			actualVisibleHeight-- // Reserve line for "↑N more"
+			actualVisibleHeight--
 		}
-		hiddenBelow := len(m.rosters) - m.offset - actualVisibleHeight
+		hiddenBelow := len(roster) - m.offset - actualVisibleHeight
 		if hiddenBelow > 0 {
-			actualVisibleHeight-- // Reserve line for "↓N more"
-			hiddenBelow = len(m.rosters) - m.offset - actualVisibleHeight
+			actualVisibleHeight--
+			hiddenBelow = len(roster) - m.offset - actualVisibleHeight
 		}
 
-		// Show "↑N more" indicator if there are hidden contacts above
 		if m.offset > 0 {
 			moreText := fmt.Sprintf("  ↑ %d more", m.offset)
 			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
 			b.WriteString("\n")
 		}
 
-		// Render visible roster entries
-		for i := m.offset; i < len(m.rosters) && i < m.offset+actualVisibleHeight; i++ {
-			r := m.rosters[i]
+		for i := m.offset; i < len(roster) && i < m.offset+actualVisibleHeight; i++ {
+			r := roster[i]
 			selected := i == m.selected && m.focusSection == SectionContacts
 			line := m.renderRoster(r, selected)
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
 
-		// Show "↓N more" indicator if there are hidden contacts below
 		if hiddenBelow > 0 {
 			moreText := fmt.Sprintf("  ↓ %d more", hiddenBelow)
 			b.WriteString(m.styles.RosterContact.Foreground(lipgloss.Color("242")).Width(m.width - 2).Render(moreText))
 			b.WriteString("\n")
 		}
 
-		// Pad remaining roster lines
 		rostersRendered := 0
-		if len(m.rosters) > 0 {
+		if len(roster) > 0 {
 			end := m.offset + actualVisibleHeight
-			if end > len(m.rosters) {
-				end = len(m.rosters)
+			if end > len(roster) {
+				end = len(roster)
 			}
 			rostersRendered = end - m.offset
 		}
-		// Account for indicator lines in padding calculation
 		linesUsed := rostersRendered
 		if m.offset > 0 {
 			linesUsed++

@@ -1102,6 +1102,16 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 			m.dialog = m.dialog.ShowUploadFile(jid)
 			m.focus = FocusDialog
 		}
+
+	case keybindings.ActionSearchContacts:
+		if m.focus == FocusRoster {
+			if m.roster.InFilterMode() {
+				m.roster = m.roster.ExitFilterMode()
+			} else {
+				m.roster = m.roster.EnterFilterMode()
+				m.keys.SetMode(keybindings.ModeInsert)
+			}
+		}
 	}
 
 	return nil
@@ -1432,10 +1442,32 @@ func (m *Model) updateFocusedComponent(msg tea.KeyMsg) []tea.Cmd {
 		}
 
 	case FocusRoster:
-		var cmd tea.Cmd
-		m.roster, cmd = m.roster.Update(msg)
-		if cmd != nil {
-			cmds = append(cmds, cmd)
+		if m.roster.InFilterMode() {
+			switch msg.Type {
+			case tea.KeyEscape:
+				m.roster = m.roster.ExitFilterMode()
+				m.keys.SetMode(keybindings.ModeNormal)
+			case tea.KeyEnter:
+				if jid := m.roster.SelectedJID(); jid != "" {
+					m.openChat(jid)
+					m.roster = m.roster.ExitFilterMode()
+					m.focus = FocusChat
+					m.keys.SetMode(keybindings.ModeInsert)
+				}
+			case tea.KeyBackspace:
+				query := m.roster.FilterQuery()
+				if len(query) > 0 {
+					m.roster = m.roster.UpdateFilter(query[:len(query)-1])
+				}
+			case tea.KeyRunes:
+				m.roster = m.roster.UpdateFilter(m.roster.FilterQuery() + string(msg.Runes))
+			}
+		} else {
+			var cmd tea.Cmd
+			m.roster, cmd = m.roster.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 

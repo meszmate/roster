@@ -182,6 +182,7 @@ const (
 	ActionCorrectMessage
 	ActionAddReaction
 	ActionUploadFile
+	ActionSearchContacts
 )
 
 // KeyBinding represents a key binding
@@ -314,6 +315,7 @@ func (m *Manager) setupDefaultBindings() {
 		"cc": ActionCorrectMessage,   // 'c' prefix + 'c' for correct last message
 		"cr": ActionAddReaction,      // 'c' prefix + 'r' for add reaction
 		"cf": ActionUploadFile,       // 'c' prefix + 'f' for upload file
+		"f":  ActionSearchContacts,   // 'f' for filter/search contacts
 
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings
