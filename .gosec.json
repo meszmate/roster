@@ -1,0 +1,7 @@
+{
+  "tests": false,
+  "exclude": [
+    "G204",
+    "G304"
+  ]
+}

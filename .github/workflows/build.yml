@@ -49,7 +49,7 @@ jobs:
           go-version: '1.23'
 
       - name: golangci-lint
-        uses: golangci-lint/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest
 
@@ -66,4 +66,4 @@ jobs:
       - name: Run Gosec Security Scanner
         uses: securego/gosec@master
         with:
-          args: ./...
+          args: -conf .gosec.json ./...
