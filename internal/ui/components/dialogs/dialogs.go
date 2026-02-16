@@ -38,6 +38,7 @@ const (
 	DialogRegisterForm
 	DialogRegisterSuccess
 	DialogConfirmSaveMessages
+	DialogBookmarks
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -112,6 +113,10 @@ type Model struct {
 	// OMEMO devices
 	omemoDevices   []OMEMODeviceInfo
 	selectedDevice int
+
+	// Bookmarks
+	bookmarks        []BookmarkInfo
+	selectedBookmark int
 }
 
 // OMEMODeviceInfo represents info about an OMEMO device
@@ -120,6 +125,14 @@ type OMEMODeviceInfo struct {
 	Fingerprint string
 	TrustLevel  int
 	TrustString string
+}
+
+// BookmarkInfo represents info about a bookmark
+type BookmarkInfo struct {
+	RoomJID  string
+	Name     string
+	Nick     string
+	Autojoin bool
 }
 
 // DialogInput represents an input field in a dialog
@@ -273,6 +286,26 @@ func (m Model) GetSelectedOMEMODevice() (OMEMODeviceInfo, int, bool) {
 		return OMEMODeviceInfo{}, 0, false
 	}
 	return m.omemoDevices[m.selectedDevice], m.selectedDevice, true
+}
+
+// ShowBookmarks shows bookmarks management dialog
+func (m Model) ShowBookmarks(bookmarks []BookmarkInfo) Model {
+	m.dialogType = DialogBookmarks
+	m.title = "Bookmarks"
+	m.bookmarks = bookmarks
+	m.selectedBookmark = 0
+	m.buttons = []string{"Join", "Delete", "Close"}
+	m.activeBtn = 2
+	m.inputs = nil
+	return m
+}
+
+// GetSelectedBookmark returns the currently selected bookmark
+func (m Model) GetSelectedBookmark() (BookmarkInfo, int, bool) {
+	if len(m.bookmarks) == 0 || m.selectedBookmark >= len(m.bookmarks) {
+		return BookmarkInfo{}, 0, false
+	}
+	return m.bookmarks[m.selectedBookmark], m.selectedBookmark, true
 }
 
 // ShowSubscription shows subscription request dialog
@@ -1118,6 +1151,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
+		// Handle Bookmarks dialog
+		if m.dialogType == DialogBookmarks {
+			switch msg.String() {
+			case "j", "down":
+				if m.selectedBookmark < len(m.bookmarks)-1 {
+					m.selectedBookmark++
+				}
+				return m, nil
+			case "k", "up":
+				if m.selectedBookmark > 0 {
+					m.selectedBookmark--
+				}
+				return m, nil
+			}
+		}
+
 		// Handle number keys 1-9 for button selection (when not in input fields)
 		if len(m.inputs) == 0 || m.dialogType == DialogRegisterSuccess {
 			if keyStr >= "1" && keyStr <= "9" {
@@ -1428,6 +1477,45 @@ func (m Model) View() string {
 			b.WriteString(m.styles.DialogContent.Render(fpLine))
 			b.WriteString("\n\n")
 		}
+	}
+
+	// Bookmarks list
+	if m.dialogType == DialogBookmarks && len(m.bookmarks) > 0 {
+		b.WriteString("Rooms (j/k to select):\n\n")
+		for i, bm := range m.bookmarks {
+			prefix := "  "
+			if i == m.selectedBookmark {
+				prefix = "> "
+			}
+
+			autojoinStr := ""
+			if bm.Autojoin {
+				autojoinStr = " [autojoin]"
+			}
+
+			name := bm.Name
+			if name == "" {
+				name = bm.RoomJID
+			}
+
+			line := prefix + name + autojoinStr
+			b.WriteString(m.styles.DialogContent.Render(line))
+			b.WriteString("\n")
+
+			roomLine := "   " + bm.RoomJID
+			b.WriteString(m.styles.DialogContent.Render(roomLine))
+			b.WriteString("\n")
+
+			if bm.Nick != "" {
+				nickLine := "   Nick: " + bm.Nick
+				b.WriteString(m.styles.DialogContent.Render(nickLine))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+	} else if m.dialogType == DialogBookmarks {
+		b.WriteString(m.styles.DialogContent.Render("No bookmarks saved."))
+		b.WriteString("\n\n")
 	}
 
 	// Inputs

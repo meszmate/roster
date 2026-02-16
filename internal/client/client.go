@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	xmpp "github.com/meszmate/xmpp-go"
+	xmp "github.com/meszmate/xmpp-go"
 	"github.com/meszmate/xmpp-go/dial"
 	"github.com/meszmate/xmpp-go/jid"
 	"github.com/meszmate/xmpp-go/plugin"
@@ -32,6 +32,7 @@ import (
 	"github.com/meszmate/xmpp-go/plugins/roster"
 	"github.com/meszmate/xmpp-go/plugins/upload"
 	"github.com/meszmate/xmpp-go/stanza"
+	"github.com/meszmate/xmpp-go/storage"
 	"github.com/meszmate/xmpp-go/storage/memory"
 	"github.com/meszmate/xmpp-go/transport"
 
@@ -40,8 +41,8 @@ import (
 
 type Client struct {
 	mu        sync.RWMutex
-	client    *xmpp.Client
-	session   *xmpp.Session
+	client    *xmp.Client
+	session   *xmp.Session
 	jid       jid.JID
 	password  string
 	server    string
@@ -194,20 +195,20 @@ func (c *Client) Connect() error {
 		}
 	}
 
-	client, err := xmpp.NewClient(c.jid, c.password,
-		xmpp.WithPlugins(plugins...),
-		xmpp.WithHandler(xmpp.HandlerFunc(c.handleStanza)),
+	client, err := xmp.NewClient(c.jid, c.password,
+		xmp.WithPlugins(plugins...),
+		xmp.WithHandler(xmp.HandlerFunc(c.handleStanza)),
 	)
 	if err != nil {
 		trans.Close()
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
-	sessionOpts := []xmpp.SessionOption{
-		xmpp.WithLocalAddr(c.jid),
+	sessionOpts := []xmp.SessionOption{
+		xmp.WithLocalAddr(c.jid),
 	}
 
-	session, err := xmpp.NewSession(c.ctx, trans, sessionOpts...)
+	session, err := xmp.NewSession(c.ctx, trans, sessionOpts...)
 	if err != nil {
 		trans.Close()
 		return fmt.Errorf("failed to create session: %w", err)
@@ -250,7 +251,7 @@ func (c *Client) serve() {
 	}
 }
 
-func (c *Client) handleStanza(ctx context.Context, session *xmpp.Session, st stanza.Stanza) error {
+func (c *Client) handleStanza(ctx context.Context, session *xmp.Session, st stanza.Stanza) error {
 	switch s := st.(type) {
 	case *stanza.Message:
 		c.handleMessage(s)
@@ -807,6 +808,88 @@ func (c *Client) GetRosterItems() ([]RosterItem, error) {
 	}
 
 	return rosterItems, nil
+}
+
+type Bookmark struct {
+	RoomJID  string
+	Name     string
+	Nick     string
+	Password string
+	Autojoin bool
+}
+
+func (c *Client) GetBookmarks() ([]Bookmark, error) {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("not connected")
+	}
+	c.mu.RUnlock()
+
+	bp, ok := c.plugins.Get(bookmarks.Name)
+	if !ok {
+		return nil, fmt.Errorf("bookmarks plugin not available")
+	}
+
+	userJID := c.jid.Bare().String()
+	bms, err := bp.(*bookmarks.Plugin).List(c.ctx, userJID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]Bookmark, len(bms))
+	for i, bm := range bms {
+		result[i] = Bookmark{
+			RoomJID:  bm.RoomJID,
+			Name:     bm.Name,
+			Nick:     bm.Nick,
+			Password: bm.Password,
+			Autojoin: bm.Autojoin,
+		}
+	}
+	return result, nil
+}
+
+func (c *Client) AddBookmark(roomJID, name, nick, password string, autojoin bool) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	c.mu.RUnlock()
+
+	bp, ok := c.plugins.Get(bookmarks.Name)
+	if !ok {
+		return fmt.Errorf("bookmarks plugin not available")
+	}
+
+	userJID := c.jid.Bare().String()
+	bm := &storage.Bookmark{
+		UserJID:  userJID,
+		RoomJID:  roomJID,
+		Name:     name,
+		Nick:     nick,
+		Password: password,
+		Autojoin: autojoin,
+	}
+	return bp.(*bookmarks.Plugin).Set(c.ctx, bm)
+}
+
+func (c *Client) DeleteBookmark(roomJID string) error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	c.mu.RUnlock()
+
+	bp, ok := c.plugins.Get(bookmarks.Name)
+	if !ok {
+		return fmt.Errorf("bookmarks plugin not available")
+	}
+
+	userJID := c.jid.Bare().String()
+	return bp.(*bookmarks.Plugin).Delete(c.ctx, userJID, roomJID)
 }
 
 func (c *Client) QueryMAM(jid, afterID string) error {

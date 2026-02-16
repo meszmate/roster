@@ -130,6 +130,7 @@ const (
 	ActionJoinRoom
 	ActionLeaveRoom
 	ActionShowParticipants
+	ActionShowBookmarks
 
 	// Misc
 	ActionMark
@@ -305,6 +306,7 @@ func (m *Manager) setupDefaultBindings() {
 		"gj": ActionJoinRoom,         // 'g' prefix + 'j' for join
 		"gC": ActionCreateRoom,       // 'g' prefix + 'C' for create room
 		"gp": ActionShowParticipants, // 'g' prefix + 'p' for participants
+		"gb": ActionShowBookmarks,    // 'g' prefix + 'b' for bookmarks
 
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings

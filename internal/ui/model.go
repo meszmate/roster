@@ -1037,6 +1037,20 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				}
 			}
 		}
+
+	case keybindings.ActionShowBookmarks:
+		bookmarks := m.app.GetBookmarks()
+		var dialogBookmarks []dialogs.BookmarkInfo
+		for _, bm := range bookmarks {
+			dialogBookmarks = append(dialogBookmarks, dialogs.BookmarkInfo{
+				RoomJID:  bm.RoomJID,
+				Name:     bm.Name,
+				Nick:     bm.Nick,
+				Autojoin: bm.Autojoin,
+			})
+		}
+		m.dialog = m.dialog.ShowBookmarks(dialogBookmarks)
+		m.focus = FocusDialog
 	}
 
 	return nil
@@ -2057,6 +2071,24 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				_ = m.app.SetOMEMOTrust(jid, device.DeviceID, 3)
 			case 3:
 				_ = m.app.DeleteOMEMODevice(jid, device.DeviceID)
+			}
+		}
+
+	case dialogs.DialogBookmarks:
+		if bm, _, ok := m.dialog.GetSelectedBookmark(); ok {
+			switch result.Button {
+			case 0:
+				// Join room
+				if bm.Nick != "" {
+					_ = m.app.JoinRoom(bm.RoomJID, bm.Nick, "")
+				} else {
+					_ = m.app.JoinRoom(bm.RoomJID, "", "")
+				}
+				m.windows = m.windows.OpenMUC(bm.RoomJID, bm.Nick)
+				m.loadActiveWindow()
+			case 1:
+				// Delete bookmark
+				_ = m.app.DeleteBookmark(bm.RoomJID)
 			}
 		}
 	}

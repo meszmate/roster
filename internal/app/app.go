@@ -1957,6 +1957,69 @@ func (a *App) LeaveRoom(roomJID, nick string) error {
 	return c.LeaveRoom(roomJID)
 }
 
+// Bookmark represents a bookmarked room
+type Bookmark struct {
+	RoomJID  string
+	Name     string
+	Nick     string
+	Password string
+	Autojoin bool
+}
+
+// GetBookmarks returns all bookmarks for the current account
+func (a *App) GetBookmarks() []Bookmark {
+	a.mu.RLock()
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if c == nil || !c.IsConnected() {
+		return nil
+	}
+
+	bms, err := c.GetBookmarks()
+	if err != nil {
+		return nil
+	}
+
+	result := make([]Bookmark, len(bms))
+	for i, bm := range bms {
+		result[i] = Bookmark{
+			RoomJID:  bm.RoomJID,
+			Name:     bm.Name,
+			Nick:     bm.Nick,
+			Password: bm.Password,
+			Autojoin: bm.Autojoin,
+		}
+	}
+	return result
+}
+
+// AddBookmark adds a bookmark for a room
+func (a *App) AddBookmark(roomJID, name, nick, password string, autojoin bool) error {
+	a.mu.RLock()
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if c == nil || !c.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	return c.AddBookmark(roomJID, name, nick, password, autojoin)
+}
+
+// DeleteBookmark removes a bookmark
+func (a *App) DeleteBookmark(roomJID string) error {
+	a.mu.RLock()
+	c := a.xmppClient
+	a.mu.RUnlock()
+
+	if c == nil || !c.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+
+	return c.DeleteBookmark(roomJID)
+}
+
 // ToggleStatusSharing toggles status sharing for a contact
 // Returns the new state (true = sharing enabled)
 func (a *App) ToggleStatusSharing(contactJID string) (bool, error) {
