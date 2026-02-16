@@ -772,6 +772,22 @@ func (a *App) AddReactionToHistory(contactJID, msgID, from, reaction string) {
 	})
 }
 
+func (a *App) RequestUploadSlot(serviceJID, filename string, size int64, contentType string) (*client.UploadSlot, error) {
+	a.mu.RLock()
+	c := a.clients[a.currentAccount]
+	a.mu.RUnlock()
+
+	if c == nil || !c.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+
+	return c.RequestUploadSlot(serviceJID, filename, size, contentType)
+}
+
+func (a *App) SendFileMessage(to, getURL string) tea.Cmd {
+	return a.SendChatMessage(to, getURL)
+}
+
 // ExecuteCommand executes a command
 func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 	return func() tea.Msg {

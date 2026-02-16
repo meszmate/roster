@@ -63,6 +63,8 @@ type Client struct {
 	onError      func(err error)
 	onReceipt    func(messageID string, status string)
 
+	pendingIQs map[string]chan *stanza.IQ
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -131,14 +133,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Client{
-		jid:      parsedJID,
-		password: cfg.Password,
-		server:   cfg.Server,
-		port:     cfg.Port,
-		resource: cfg.Resource,
-		deviceID: deviceID,
-		ctx:      ctx,
-		cancel:   cancel,
+		jid:        parsedJID,
+		password:   cfg.Password,
+		server:     cfg.Server,
+		port:       cfg.Port,
+		resource:   cfg.Resource,
+		deviceID:   deviceID,
+		pendingIQs: make(map[string]chan *stanza.IQ),
+		ctx:        ctx,
+		cancel:     cancel,
 	}, nil
 }
 
@@ -340,6 +343,14 @@ func (c *Client) handlePresence(p *stanza.Presence) {
 }
 
 func (c *Client) handleIQ(iq *stanza.IQ) {
+	c.mu.Lock()
+	if ch, ok := c.pendingIQs[iq.ID]; ok {
+		delete(c.pendingIQs, iq.ID)
+		c.mu.Unlock()
+		ch <- iq
+		return
+	}
+	c.mu.Unlock()
 }
 
 func (c *Client) handleDisconnect(err error) {
@@ -978,6 +989,81 @@ func (c *Client) SendReaction(to, messageID, reaction string) error {
 	})
 
 	return session.Send(c.ctx, msg)
+}
+
+type UploadSlot struct {
+	PutURL  string
+	GetURL  string
+	Headers map[string]string
+}
+
+func (c *Client) RequestUploadSlot(serviceJID, filename string, size int64, contentType string) (*UploadSlot, error) {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return nil, fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	service, err := jid.Parse(serviceJID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid service JID: %w", err)
+	}
+
+	iq := stanza.NewIQ(stanza.IQGet)
+	iq.ID = stanza.GenerateID()
+	iq.To = service
+
+	req := &upload.Request{
+		Filename:    filename,
+		Size:        size,
+		ContentType: contentType,
+	}
+	reqData, _ := xml.Marshal(req)
+	iq.Query = reqData
+
+	respCh := make(chan *stanza.IQ, 1)
+	c.mu.Lock()
+	c.pendingIQs[iq.ID] = respCh
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.pendingIQs, iq.ID)
+		c.mu.Unlock()
+	}()
+
+	if err := session.Send(c.ctx, iq); err != nil {
+		return nil, err
+	}
+
+	select {
+	case resp := <-respCh:
+		if resp.Type == stanza.IQError {
+			return nil, fmt.Errorf("upload slot request failed")
+		}
+
+		var slot upload.Slot
+		if err := xml.Unmarshal(resp.Query, &slot); err != nil {
+			return nil, fmt.Errorf("failed to parse slot response: %w", err)
+		}
+
+		result := &UploadSlot{
+			PutURL:  slot.Put.URL,
+			GetURL:  slot.Get.URL,
+			Headers: make(map[string]string),
+		}
+		for _, h := range slot.Put.Headers {
+			result.Headers[h.Name] = h.Value
+		}
+		return result, nil
+
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("upload slot request timed out")
+	case <-c.ctx.Done():
+		return nil, c.ctx.Err()
+	}
 }
 
 func (c *Client) QueryMAM(jid, afterID string) error {

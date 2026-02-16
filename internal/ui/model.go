@@ -1,10 +1,14 @@
 package ui
 
 import (
+	"fmt"
+	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1090,6 +1094,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.dialog = m.dialog.ShowReactions(jid, msgID)
 				m.focus = FocusDialog
 			}
+		}
+
+	case keybindings.ActionUploadFile:
+		if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			jid := m.windows.ActiveJID()
+			m.dialog = m.dialog.ShowUploadFile(jid)
+			m.focus = FocusDialog
 		}
 	}
 
@@ -2177,6 +2188,19 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				m.chat = m.chat.AddReaction(messageID, m.app.CurrentAccount(), reaction)
 			}
 		}
+
+	case dialogs.DialogUploadFile:
+		if result.Confirmed {
+			jid := result.Values["jid"]
+			filepath := result.Values["filepath"]
+			if jid != "" && filepath != "" {
+				m.chat = m.chat.SetStatusMsg("Uploading file...")
+				return tea.Sequence(
+					m.uploadFile(jid, filepath),
+					func() tea.Msg { return nil },
+				)
+			}
+		}
 	}
 
 	m.focus = FocusRoster
@@ -2251,7 +2275,70 @@ func isDangerousFileType(url string) bool {
 	return false
 }
 
-// openURL opens a URL in the default browser
+func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
+	return func() tea.Msg {
+		fileInfo, err := os.Stat(filepath)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Cannot access file: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+
+		file, err := os.Open(filepath)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Cannot open file: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+		defer file.Close()
+
+		filename := fileInfo.Name()
+		size := fileInfo.Size()
+		contentType := "application/octet-stream"
+
+		serviceJID := "upload." + m.app.CurrentAccount()
+		if idx := strings.Index(m.app.CurrentAccount(), "@"); idx > 0 {
+			serviceJID = "upload." + m.app.CurrentAccount()[idx+1:]
+		}
+
+		slot, err := m.app.RequestUploadSlot(serviceJID, filename, size, contentType)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Failed to get upload slot: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+
+		req, err := http.NewRequest("PUT", slot.PutURL, file)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Failed to create upload request: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.ContentLength = size
+		for k, v := range slot.Headers {
+			req.Header.Set(k, v)
+		}
+
+		client := &http.Client{Timeout: 5 * time.Minute}
+		resp, err := client.Do(req)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Upload failed: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			m.dialog = m.dialog.ShowError(fmt.Sprintf("Upload failed with status: %s", resp.Status))
+			m.focus = FocusDialog
+			return nil
+		}
+
+		return m.app.SendFileMessage(jid, slot.GetURL)()
+	}
+}
+
 func openURL(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {

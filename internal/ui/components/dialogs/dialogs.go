@@ -42,6 +42,7 @@ const (
 	DialogSetStatus
 	DialogCorrectMessage
 	DialogReactions
+	DialogUploadFile
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -352,6 +353,21 @@ func (m Model) ShowReactions(jid, messageID string) Model {
 	m.inputs = nil
 	m.data["jid"] = jid
 	m.data["message_id"] = messageID
+	return m
+}
+
+func (m Model) ShowUploadFile(jid string) Model {
+	m.dialogType = DialogUploadFile
+	m.title = "Upload File"
+	m.message = "Enter file path to upload:"
+	m.inputs = []DialogInput{
+		{Label: "File path", Key: "filepath", Value: ""},
+	}
+	m.buttons = []string{"Upload", "Cancel"}
+	m.activeBtn = 0
+	m.activeInput = 0
+	m.inCheckboxes = false
+	m.data["jid"] = jid
 	return m
 }
 
