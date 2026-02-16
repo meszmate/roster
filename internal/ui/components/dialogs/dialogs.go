@@ -40,6 +40,7 @@ const (
 	DialogConfirmSaveMessages
 	DialogBookmarks
 	DialogSetStatus
+	DialogCorrectMessage
 )
 
 // DialogAction represents what action triggered the dialog result
@@ -321,6 +322,23 @@ func (m Model) ShowSetStatus(currentStatus, currentMsg string) Model {
 	m.activeBtn = 0
 	m.activeInput = 1
 	m.inCheckboxes = false
+	return m
+}
+
+func (m Model) ShowCorrectMessage(jid, originalID, originalBody string) Model {
+	m.dialogType = DialogCorrectMessage
+	m.title = "Correct Last Message"
+	m.message = ""
+	m.inputs = []DialogInput{
+		{Label: "Original", Key: "original", Value: originalBody, ReadOnly: true},
+		{Label: "Correction", Key: "correction", Value: originalBody, Cursor: len(originalBody)},
+	}
+	m.buttons = []string{"Correct", "Cancel"}
+	m.activeBtn = 0
+	m.activeInput = 1
+	m.inCheckboxes = false
+	m.data["jid"] = jid
+	m.data["original_id"] = originalID
 	return m
 }
 

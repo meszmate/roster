@@ -179,6 +179,7 @@ const (
 	// File handling
 	ActionOpenFileURL
 	ActionCopyFileURL
+	ActionCorrectMessage
 )
 
 // KeyBinding represents a key binding
@@ -308,6 +309,7 @@ func (m *Manager) setupDefaultBindings() {
 		"gC": ActionCreateRoom,       // 'g' prefix + 'C' for create room
 		"gp": ActionShowParticipants, // 'g' prefix + 'p' for participants
 		"gb": ActionShowBookmarks,    // 'g' prefix + 'b' for bookmarks
+		"cc": ActionCorrectMessage,   // 'c' prefix + 'c' for correct last message
 
 		// Settings
 		"gs": ActionShowSettings, // 'g' prefix + 's' for settings

@@ -59,15 +59,16 @@ const (
 
 // ChatMessage represents a chat message
 type ChatMessage struct {
-	ID        string
-	From      string
-	To        string
-	Body      string
-	Timestamp time.Time
-	Encrypted bool
-	Type      string
-	Outgoing  bool
-	Status    MessageStatus
+	ID          string
+	From        string
+	To          string
+	Body        string
+	Timestamp   time.Time
+	Encrypted   bool
+	Type        string
+	Outgoing    bool
+	Status      MessageStatus
+	CorrectedID string
 }
 
 // MessageStatusUpdateMsg is sent when a message status changes
@@ -652,6 +653,84 @@ func (a *App) UpdateMessageStatus(contactJID, msgID string, status MessageStatus
 		Data: MessageStatusUpdateMsg{
 			MessageID: msgID,
 			Status:    status,
+		},
+	})
+}
+
+func (a *App) CorrectMessage(to, originalID, newBody string) tea.Cmd {
+	return func() tea.Msg {
+		a.mu.RLock()
+		client := a.clients[a.currentAccount]
+		a.mu.RUnlock()
+
+		if client == nil || !client.IsConnected() {
+			return SendMessageResultMsg{
+				Success: false,
+				To:      to,
+				Error:   "not connected",
+			}
+		}
+
+		newID, err := client.CorrectMessage(to, originalID, newBody)
+		if err != nil {
+			return SendMessageResultMsg{
+				Success:   false,
+				MessageID: newID,
+				To:        to,
+				Error:     err.Error(),
+			}
+		}
+
+		a.mu.Lock()
+		if messages, ok := a.chatHistory[to]; ok {
+			for i, msg := range messages {
+				if msg.ID == originalID {
+					a.chatHistory[to][i].Body = newBody
+					a.chatHistory[to][i].CorrectedID = originalID
+					break
+				}
+			}
+		}
+		a.mu.Unlock()
+
+		a.sendEvent(EventMsg{
+			Type: EventMessage,
+			Data: chat.Message{
+				ID:          newID,
+				To:          to,
+				Body:        newBody,
+				Timestamp:   time.Now(),
+				Outgoing:    true,
+				CorrectedID: originalID,
+			},
+		})
+
+		return SendMessageResultMsg{
+			Success:   true,
+			MessageID: newID,
+			To:        to,
+		}
+	}
+}
+
+func (a *App) CorrectMessageInHistory(to, originalID, newBody string) {
+	a.mu.Lock()
+	if messages, ok := a.chatHistory[to]; ok {
+		for i, msg := range messages {
+			if msg.ID == originalID {
+				a.chatHistory[to][i].Body = newBody
+				a.chatHistory[to][i].CorrectedID = originalID
+				break
+			}
+		}
+	}
+	a.mu.Unlock()
+
+	a.sendEvent(EventMsg{
+		Type: EventMessage,
+		Data: chat.Message{
+			Body:        newBody,
+			CorrectedID: originalID,
 		},
 	})
 }
@@ -1347,17 +1426,22 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 
 		newClient.SetMessageHandler(func(msg client.Message) {
 			chatMsg := chat.Message{
-				ID:        msg.ID,
-				From:      msg.From.String(),
-				To:        msg.To.String(),
-				Body:      msg.Body,
-				Timestamp: msg.Timestamp,
-				Encrypted: msg.Encrypted,
-				Outgoing:  false,
+				ID:          msg.ID,
+				From:        msg.From.String(),
+				To:          msg.To.String(),
+				Body:        msg.Body,
+				Timestamp:   msg.Timestamp,
+				Encrypted:   msg.Encrypted,
+				Outgoing:    false,
+				CorrectedID: msg.CorrectedID,
 			}
 			contactJID := msg.From.Bare().String()
-			a.AddChatMessage(contactJID, chatMsg)
-			a.IncrementContactUnread(jidStr, contactJID)
+			if chatMsg.CorrectedID != "" {
+				a.CorrectMessageInHistory(contactJID, chatMsg.CorrectedID, chatMsg.Body)
+			} else {
+				a.AddChatMessage(contactJID, chatMsg)
+				a.IncrementContactUnread(jidStr, contactJID)
+			}
 
 			if msg.ID != "" {
 				go func() {

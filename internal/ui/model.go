@@ -1060,11 +1060,21 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		m.muc = m.muc.ToggleParticipants()
 
 	case keybindings.ActionSetStatus:
-		// Show status dialog
 		currentStatus := m.app.Status()
 		currentMsg := ""
 		m.dialog = m.dialog.ShowSetStatus(currentStatus, currentMsg)
 		m.focus = FocusDialog
+
+	case keybindings.ActionCorrectMessage:
+		if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			jid := m.windows.ActiveJID()
+			lastMsgID := m.chat.GetLastOutgoingMessageID()
+			lastMsgBody := m.chat.GetLastOutgoingMessageBody()
+			if lastMsgID != "" && lastMsgBody != "" {
+				m.dialog = m.dialog.ShowCorrectMessage(jid, lastMsgID, lastMsgBody)
+				m.focus = FocusDialog
+			}
+		}
 	}
 
 	return nil
@@ -1413,24 +1423,31 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 		m.roster = m.roster.SetContacts(contacts)
 
 	case app.EventMessage:
-		// Handle both app.ChatMessage and chat.Message types
 		switch msg := event.Data.(type) {
 		case app.ChatMessage:
-			// Convert to chat.Message
 			chatMsg := chat.Message{
-				ID:        msg.ID,
-				From:      msg.From,
-				To:        msg.To,
-				Body:      msg.Body,
-				Timestamp: msg.Timestamp,
-				Encrypted: msg.Encrypted,
-				Type:      msg.Type,
-				Outgoing:  msg.Outgoing,
-				Status:    chat.MessageStatus(msg.Status),
+				ID:          msg.ID,
+				From:        msg.From,
+				To:          msg.To,
+				Body:        msg.Body,
+				Timestamp:   msg.Timestamp,
+				Encrypted:   msg.Encrypted,
+				Type:        msg.Type,
+				Outgoing:    msg.Outgoing,
+				Status:      chat.MessageStatus(msg.Status),
+				CorrectedID: msg.CorrectedID,
 			}
-			m.chat = m.chat.AddMessage(chatMsg)
+			if chatMsg.CorrectedID != "" {
+				m.chat = m.chat.CorrectMessage(chatMsg.CorrectedID, chatMsg.Body)
+			} else {
+				m.chat = m.chat.AddMessage(chatMsg)
+			}
 		case chat.Message:
-			m.chat = m.chat.AddMessage(msg)
+			if msg.CorrectedID != "" {
+				m.chat = m.chat.CorrectMessage(msg.CorrectedID, msg.Body)
+			} else {
+				m.chat = m.chat.AddMessage(msg)
+			}
 		}
 
 	case app.EventPresence:
@@ -2107,12 +2124,21 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 		}
 
 	case dialogs.DialogSetStatus:
-		// Button 0-4 are status types, 5 is cancel
 		if result.Button < 5 {
 			statuses := []string{"online", "away", "dnd", "xa", "offline"}
 			status := statuses[result.Button]
 			message := result.Values["message"]
 			_ = m.app.SetStatusAndSend(status, message)
+		}
+
+	case dialogs.DialogCorrectMessage:
+		if result.Confirmed {
+			jid := result.Values["jid"]
+			originalID := result.Values["original_id"]
+			correction := result.Values["correction"]
+			if jid != "" && originalID != "" && correction != "" {
+				return m.app.CorrectMessage(jid, originalID, correction)
+			}
 		}
 	}
 

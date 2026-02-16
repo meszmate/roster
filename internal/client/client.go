@@ -68,14 +68,15 @@ type Client struct {
 }
 
 type Message struct {
-	ID        string
-	From      jid.JID
-	To        jid.JID
-	Body      string
-	Type      string
-	Timestamp time.Time
-	Thread    string
-	Encrypted bool
+	ID          string
+	From        jid.JID
+	To          jid.JID
+	Body        string
+	Type        string
+	Timestamp   time.Time
+	Thread      string
+	Encrypted   bool
+	CorrectedID string
 }
 
 type Presence struct {
@@ -292,7 +293,12 @@ func (c *Client) handleMessage(msg *stanza.Message) {
 	for _, ext := range msg.Extensions {
 		if ext.XMLName.Local == "encrypted" {
 			m.Encrypted = true
-			break
+		}
+		if ext.XMLName.Space == "urn:xmpp:message-correct:0" && ext.XMLName.Local == "replace" {
+			var replace correction.Replace
+			if err := xml.Unmarshal(ext.Inner, &replace); err == nil {
+				m.CorrectedID = replace.ID
+			}
 		}
 	}
 
@@ -890,6 +896,41 @@ func (c *Client) DeleteBookmark(roomJID string) error {
 
 	userJID := c.jid.Bare().String()
 	return bp.(*bookmarks.Plugin).Delete(c.ctx, userJID, roomJID)
+}
+
+func (c *Client) CorrectMessage(to, originalID, newBody string) (string, error) {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return "", fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	toJID, err := jid.Parse(to)
+	if err != nil {
+		return "", fmt.Errorf("invalid JID: %w", err)
+	}
+
+	id := stanza.GenerateID()
+
+	msg := stanza.NewMessage(stanza.MessageChat)
+	msg.To = toJID
+	msg.ID = id
+	msg.Body = newBody
+
+	replace := &correction.Replace{ID: originalID}
+	replaceData, _ := xml.Marshal(replace)
+	msg.Extensions = append(msg.Extensions, stanza.Extension{
+		XMLName: xml.Name{Space: "urn:xmpp:message-correct:0", Local: "replace"},
+		Inner:   replaceData,
+	})
+
+	if err := session.Send(c.ctx, msg); err != nil {
+		return "", err
+	}
+
+	return id, nil
 }
 
 func (c *Client) QueryMAM(jid, afterID string) error {

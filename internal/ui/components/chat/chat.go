@@ -38,22 +38,22 @@ func SpinnerTick() tea.Cmd {
 
 // Message represents a chat message
 type Message struct {
-	ID        string
-	From      string
-	To        string
-	Body      string
-	Timestamp time.Time
-	Encrypted bool
-	Read      bool
-	Type      string // chat, groupchat, system
-	Outgoing  bool
-	Status    MessageStatus // Delivery status for outgoing messages
+	ID          string
+	From        string
+	To          string
+	Body        string
+	Timestamp   time.Time
+	Encrypted   bool
+	Read        bool
+	Type        string // chat, groupchat, system
+	Outgoing    bool
+	Status      MessageStatus // Delivery status for outgoing messages
+	CorrectedID string
 
-	// File transfer fields
-	FileURL  string // URL if message contains a file
-	FileName string // Extracted filename
-	FileSize int64  // Size in bytes if known
-	FileMIME string // MIME type if known
+	FileURL  string
+	FileName string
+	FileSize int64
+	FileMIME string
 }
 
 // SendMsg is sent when a message should be sent
@@ -360,6 +360,35 @@ func (m Model) UpdateMessageStatus(msgID string, status MessageStatus) Model {
 		}
 	}
 	return m
+}
+
+func (m Model) CorrectMessage(originalID, newBody string) Model {
+	for i, msg := range m.messages {
+		if msg.ID == originalID {
+			m.messages[i].Body = newBody
+			m.messages[i].CorrectedID = originalID
+			break
+		}
+	}
+	return m
+}
+
+func (m Model) GetLastOutgoingMessageID() string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Outgoing {
+			return m.messages[i].ID
+		}
+	}
+	return ""
+}
+
+func (m Model) GetLastOutgoingMessageBody() string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Outgoing {
+			return m.messages[i].Body
+		}
+	}
+	return ""
 }
 
 // SelectedMessage returns the currently selected message (for file operations)
@@ -730,10 +759,14 @@ func (m Model) renderMessage(msg Message) []string {
 	}
 
 	wrapped := wordWrap(msg.Body, maxWidth)
+	correctedMarker := ""
+	if msg.CorrectedID != "" {
+		correctedMarker = " " + m.styles.ChatSystem.Render("(edited)")
+	}
 	for i, line := range wrapped {
 		var formatted string
 		if i == 0 {
-			formatted = fmt.Sprintf("%s %s: %s%s", timestamp, nickStr, bodyStyle.Render(line), statusStr)
+			formatted = fmt.Sprintf("%s %s: %s%s%s", timestamp, nickStr, bodyStyle.Render(line), correctedMarker, statusStr)
 		} else {
 			padding := strings.Repeat(" ", 6+len(nick)+2)
 			formatted = padding + bodyStyle.Render(line)
