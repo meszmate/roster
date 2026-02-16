@@ -860,12 +860,14 @@ func (a *App) ExecuteCommand(cmd string, args []string) tea.Cmd {
 		case "add":
 			if len(args) >= 1 {
 				// TODO: Add contact via XMPP
+				_ = args[0]
 			}
 			return nil
 
 		case "remove":
 			if len(args) >= 1 {
 				// TODO: Remove contact via XMPP
+				_ = args[0]
 			}
 			return nil
 

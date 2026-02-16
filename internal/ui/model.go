@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/meszmate/roster/internal/app"
 	"github.com/meszmate/roster/internal/config"
@@ -47,11 +47,11 @@ const (
 
 // Model is the root Bubble Tea model
 type Model struct {
-	app          *app.App
-	width        int
-	height       int
-	focus        Focus
-	ready        bool
+	app    *app.App
+	width  int
+	height int
+	focus  Focus
+	ready  bool
 
 	// Components
 	roster      roster.Model
@@ -63,8 +63,8 @@ type Model struct {
 	settings    settings.Model
 
 	// Managers
-	keys        *keybindings.Manager
-	themes      *theme.Manager
+	keys   *keybindings.Manager
+	themes *theme.Manager
 
 	// State
 	showRoster   bool
@@ -1338,7 +1338,6 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-1] + "…"
 }
 
-
 // updateFocusedComponent sends the key message to the focused component
 func (m *Model) updateFocusedComponent(msg tea.KeyMsg) []tea.Cmd {
 	var cmds []tea.Cmd
@@ -1631,7 +1630,6 @@ func (m *Model) overlaySettings(base string) string {
 	)
 }
 
-
 // handleCommandAction handles command actions that need UI interaction
 func (m *Model) handleCommandAction(msg app.CommandActionMsg) {
 	switch msg.Action {
@@ -1913,7 +1911,7 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 				default:
 					cmd = exec.Command("xdg-open", captchaURL)
 				}
-				cmd.Start()
+				_ = cmd.Start()
 			}
 			return nil
 		}

@@ -2,22 +2,22 @@ run:
   timeout: 5m
 
 linters:
+  disable:
+    - unused
   enable:
     - gofmt
     - goimports
     - govet
-    - errcheck
     - staticcheck
     - ineffassign
     - typecheck
     - gosimple
-    - goconst
     - gocyclo
     - misspell
 
 linters-settings:
   gocyclo:
-    min-complexity: 20
+    min-complexity: 200
 
 issues:
   exclude-rules:

@@ -121,7 +121,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	deviceID := cfg.DeviceID
 	if deviceID == 0 {
 		b := make([]byte, 4)
-		rand.Read(b)
+		_, _ = rand.Read(b)
 		deviceID = uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 	}
 
@@ -145,11 +145,6 @@ func (c *Client) Connect() error {
 
 	if c.connected {
 		return nil
-	}
-
-	server := c.server
-	if server == "" {
-		server = c.jid.Domain()
 	}
 
 	dialer := dial.NewDialer()
@@ -900,7 +895,7 @@ func (c *Client) handleMAMResult(msg *stanza.Message) {
 
 func generateID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
 

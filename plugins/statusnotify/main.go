@@ -11,9 +11,9 @@ import (
 
 // StatusNotifyPlugin notifies on status changes
 type StatusNotifyPlugin struct {
-	api      plugin.API
-	running  bool
-	unsub    []func()
+	api     plugin.API
+	running bool
+	unsub   []func()
 }
 
 // Name returns the plugin name

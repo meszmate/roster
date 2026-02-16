@@ -76,18 +76,18 @@ type EnableSaveMessagesMsg struct{}
 
 // Model represents the settings component
 type Model struct {
-	cfg           *config.Config
-	section       Section
-	settings      []Setting
-	selected      int
-	editing       bool
-	editValue     string
-	editCursor    int
-	width         int
-	height        int
-	styles        *theme.Styles
-	changed       bool
-	themes        []string
+	cfg        *config.Config
+	section    Section
+	settings   []Setting
+	selected   int
+	editing    bool
+	editValue  string
+	editCursor int
+	width      int
+	height     int
+	styles     *theme.Styles
+	changed    bool
+	themes     []string
 }
 
 // New creates a new settings model
@@ -388,7 +388,7 @@ func (m Model) handleEditMode(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if setting.Type == SettingNumber {
 				// Parse number
 				var num int
-				fmt.Sscanf(m.editValue, "%d", &num)
+				_, _ = fmt.Sscanf(m.editValue, "%d", &num)
 				if num < setting.Min {
 					num = setting.Min
 				}

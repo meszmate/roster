@@ -56,27 +56,27 @@ type AccountSelectMsg struct {
 
 // Model represents the roster component
 type Model struct {
-	rosters     []Roster
-	groups      map[string][]Roster
-	selected    int
-	offset      int
-	width       int
-	height      int
-	styles      *theme.Styles
-	showGroups  bool
+	rosters        []Roster
+	groups         map[string][]Roster
+	selected       int
+	offset         int
+	width          int
+	height         int
+	styles         *theme.Styles
+	showGroups     bool
 	expandedGroups map[string]bool
-	searchQuery string
-	searchMatches []int
-	searchIndex int
+	searchQuery    string
+	searchMatches  []int
+	searchIndex    int
 
 	// Account section
-	accounts           []AccountDisplay
-	showAccountList    bool    // Full account list mode
-	accountSelected    int     // Selection in account section
-	accountOffset      int     // Scroll offset for accounts
-	focusSection       Section // Contacts or Accounts
-	maxVisibleAccounts int     // Maximum visible accounts when not focused
-	maxExpandedAccounts int    // Maximum visible accounts when focused (auto-expand)
+	accounts            []AccountDisplay
+	showAccountList     bool    // Full account list mode
+	accountSelected     int     // Selection in account section
+	accountOffset       int     // Scroll offset for accounts
+	focusSection        Section // Contacts or Accounts
+	maxVisibleAccounts  int     // Maximum visible accounts when not focused
+	maxExpandedAccounts int     // Maximum visible accounts when focused (auto-expand)
 }
 
 // New creates a new roster model
@@ -195,7 +195,6 @@ func (m Model) ToggleAccountList() Model {
 	m.showAccountList = !m.showAccountList
 	return m
 }
-
 
 // IsAccountListExpanded returns whether the account list is expanded
 func (m Model) IsAccountListExpanded() bool {
@@ -730,7 +729,6 @@ func (m Model) renderAccountsSection() string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
-		globalIdx += endIdx - startIdx
 
 		// Show "↓N more" indicator if there are hidden accounts below
 		hiddenBelow := len(saved) - endIdx
@@ -896,7 +894,7 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 	}
 
 	// Combine lines
-	result := style.Width(m.width - 2).Render(line1) + "\n" + dimStyle.Width(m.width - 2).Render(statsLine)
+	result := style.Width(m.width-2).Render(line1) + "\n" + dimStyle.Width(m.width-2).Render(statsLine)
 	return result
 }
 

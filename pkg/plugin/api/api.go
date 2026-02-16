@@ -12,16 +12,16 @@ type PluginAPI struct {
 	mu sync.RWMutex
 
 	// Callbacks to the main application
-	sendMessage       func(to, body string) error
-	getContacts       func() []plugin.Contact
-	getContact        func(jid string) *plugin.Contact
-	addContact        func(jid, name string, groups []string) error
-	removeContact     func(jid string) error
-	getPresence       func(jid string) string
-	getHistory        func(jid string, limit int) []plugin.Message
-	getUnreadCount    func(jid string) int
-	showNotification  func(title, body string) error
-	showDialog        func(title, message string, buttons []string) (int, error)
+	sendMessage      func(to, body string) error
+	getContacts      func() []plugin.Contact
+	getContact       func(jid string) *plugin.Contact
+	addContact       func(jid, name string, groups []string) error
+	removeContact    func(jid string) error
+	getPresence      func(jid string) string
+	getHistory       func(jid string, limit int) []plugin.Message
+	getUnreadCount   func(jid string) int
+	showNotification func(title, body string) error
+	showDialog       func(title, message string, buttons []string) (int, error)
 
 	// Event handlers
 	messageHandlers    []func(msg plugin.Message)

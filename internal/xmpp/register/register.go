@@ -216,9 +216,9 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 
 	// Set deadline for the entire operation
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
 	} else {
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
 	// Send initial stream header
@@ -249,7 +249,7 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 		}
 
 		// Read new features
-		features, err = readStreamFeatures(decoder)
+		_, err = readStreamFeatures(decoder)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read stream features after TLS: %w", err)
 		}
@@ -281,7 +281,7 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 	}
 
 	// Close stream
-	conn.Write([]byte("</stream:stream>"))
+	_, _ = conn.Write([]byte("</stream:stream>"))
 
 	return form, nil
 }
@@ -304,9 +304,9 @@ func SubmitRegistration(ctx context.Context, server string, port int, fields map
 
 	// Set deadline for the entire operation
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
 	} else {
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
 	// Send initial stream header
@@ -362,7 +362,7 @@ func SubmitRegistration(ctx context.Context, server string, port int, fields map
 	}
 
 	// Close stream
-	conn.Write([]byte("</stream:stream>"))
+	_, _ = conn.Write([]byte("</stream:stream>"))
 
 	return result, nil
 }

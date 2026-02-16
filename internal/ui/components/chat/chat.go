@@ -45,7 +45,7 @@ type Message struct {
 	Timestamp time.Time
 	Encrypted bool
 	Read      bool
-	Type      string        // chat, groupchat, system
+	Type      string // chat, groupchat, system
 	Outgoing  bool
 	Status    MessageStatus // Delivery status for outgoing messages
 
@@ -64,27 +64,27 @@ type SendMsg struct {
 
 // Model represents the chat component
 type Model struct {
-	messages    []Message
-	jid         string
-	input       string
-	cursorPos   int
-	offset      int
-	width       int
-	height      int
-	styles      *theme.Styles
-	encrypted   bool
-	typing      bool
-	peerTyping  bool
-	searchQuery string
+	messages      []Message
+	jid           string
+	input         string
+	cursorPos     int
+	offset        int
+	width         int
+	height        int
+	styles        *theme.Styles
+	encrypted     bool
+	typing        bool
+	peerTyping    bool
+	searchQuery   string
 	searchMatches []int
-	searchIndex int
-	statusMsg   string  // Current activity/status message
-	spinnerIdx  int     // Current spinner frame index
-	selectedMsg int     // Currently selected message index (for file operations)
+	searchIndex   int
+	statusMsg     string // Current activity/status message
+	spinnerIdx    int    // Current spinner frame index
+	selectedMsg   int    // Currently selected message index (for file operations)
 
 	// Chat header state
 	headerFocused  bool
-	headerSelected int              // 0=edit, 1=sharing, 2=verify, 3=details
+	headerSelected int                // 0=edit, 1=sharing, 2=verify, 3=details
 	contactData    *ContactDetailData // Contact info for header display
 }
 
@@ -876,18 +876,18 @@ type AccountDetailData struct {
 
 // ContactDetailData holds data for rendering contact details
 type ContactDetailData struct {
-	JID            string
-	Name           string
-	Status         string // online, away, dnd, xa, offline
-	StatusMsg      string
-	Groups         []string
-	Subscription   string
-	MyPresence     string // Your custom presence for this contact (empty = default)
-	MyPresenceMsg  string
-	LastSeen       time.Time
-	StatusSharing  bool   // Whether you share your status with this contact
-	OMEMOEnabled   bool   // Whether OMEMO is enabled for this contact
-	Fingerprints   []FingerprintDisplay
+	JID           string
+	Name          string
+	Status        string // online, away, dnd, xa, offline
+	StatusMsg     string
+	Groups        []string
+	Subscription  string
+	MyPresence    string // Your custom presence for this contact (empty = default)
+	MyPresenceMsg string
+	LastSeen      time.Time
+	StatusSharing bool // Whether you share your status with this contact
+	OMEMOEnabled  bool // Whether OMEMO is enabled for this contact
+	Fingerprints  []FingerprintDisplay
 }
 
 // FingerprintDisplay holds fingerprint info for display
@@ -1123,7 +1123,7 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	if len(contact.Fingerprints) > 0 {
 		b.WriteString("  Devices:\n")
 		for _, fp := range contact.Fingerprints {
-			trustStr := fp.Trust
+			var trustStr string
 			switch fp.Trust {
 			case "verified":
 				trustStr = m.styles.PresenceOnline.Render("[verified]")

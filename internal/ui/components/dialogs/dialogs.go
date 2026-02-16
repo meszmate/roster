@@ -105,7 +105,7 @@ type Model struct {
 	operationType OperationType
 
 	// Scroll state for help dialog
-	scrollOffset   int
+	scrollOffset    int
 	maxVisibleLines int
 }
 
@@ -555,8 +555,8 @@ type RegistrationField struct {
 
 // CaptchaInfo holds CAPTCHA display information
 type CaptchaInfo struct {
-	Type      string   // "image", "audio", "video", "qa", "hashcash"
-	Challenge string   // Challenge type (ocr, audio_recog, etc.)
+	Type      string // "image", "audio", "video", "qa", "hashcash"
+	Challenge string // Challenge type (ocr, audio_recog, etc.)
 	MimeType  string
 	Data      []byte   // Raw media data
 	URLs      []string // All available URLs
