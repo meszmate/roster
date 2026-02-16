@@ -13,6 +13,7 @@ import (
 	"github.com/meszmate/roster/internal/ui/components/chat"
 	"github.com/meszmate/roster/internal/ui/components/commandline"
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
+	"github.com/meszmate/roster/internal/ui/components/muc"
 	"github.com/meszmate/roster/internal/ui/components/roster"
 	"github.com/meszmate/roster/internal/ui/components/settings"
 	"github.com/meszmate/roster/internal/ui/components/statusbar"
@@ -61,6 +62,7 @@ type Model struct {
 	windows     windows.Model
 	dialog      dialogs.Model
 	settings    settings.Model
+	muc         muc.Model
 
 	// Managers
 	keys   *keybindings.Manager
@@ -105,6 +107,7 @@ func NewModel(application *app.App) Model {
 		windows:     windows.New(themeManager.Styles()),
 		dialog:      dialogs.New(themeManager.Styles()),
 		settings:    settings.New(cfg, themeManager.Styles(), themeManager.AvailableThemes()),
+		muc:         muc.New(themeManager.Styles()),
 	}
 }
 
@@ -1051,6 +1054,10 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 		m.dialog = m.dialog.ShowBookmarks(dialogBookmarks)
 		m.focus = FocusDialog
+
+	case keybindings.ActionShowParticipants:
+		// Toggle participant list for current MUC room
+		m.muc = m.muc.ToggleParticipants()
 	}
 
 	return nil
