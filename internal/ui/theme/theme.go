@@ -11,14 +11,14 @@ import (
 
 // Theme represents a complete UI theme
 type Theme struct {
-	Name        string           `toml:"name"`
-	Description string           `toml:"description"`
-	Colors      ColorsConfig     `toml:"colors"`
-	Roster      RosterConfig     `toml:"roster"`
-	Chat        ChatConfig       `toml:"chat"`
-	StatusBar   StatusBarConfig  `toml:"statusbar"`
+	Name        string            `toml:"name"`
+	Description string            `toml:"description"`
+	Colors      ColorsConfig      `toml:"colors"`
+	Roster      RosterConfig      `toml:"roster"`
+	Chat        ChatConfig        `toml:"chat"`
+	StatusBar   StatusBarConfig   `toml:"statusbar"`
 	CommandLine CommandLineConfig `toml:"commandline"`
-	Dialogs     DialogsConfig    `toml:"dialogs"`
+	Dialogs     DialogsConfig     `toml:"dialogs"`
 }
 
 // ColorsConfig contains the base color palette
@@ -54,16 +54,16 @@ type RosterConfig struct {
 
 // ChatConfig contains chat-specific styles
 type ChatConfig struct {
-	MyMessageFg         string `toml:"my_message_fg"`
-	MyMessageBg         string `toml:"my_message_bg"`
-	TheirMessageFg      string `toml:"their_message_fg"`
-	TheirMessageBg      string `toml:"their_message_bg"`
-	TimestampFg         string `toml:"timestamp_fg"`
-	NickFg              string `toml:"nick_fg"`
-	EncryptedIndicator  string `toml:"encrypted_indicator"`
+	MyMessageFg          string `toml:"my_message_fg"`
+	MyMessageBg          string `toml:"my_message_bg"`
+	TheirMessageFg       string `toml:"their_message_fg"`
+	TheirMessageBg       string `toml:"their_message_bg"`
+	TimestampFg          string `toml:"timestamp_fg"`
+	NickFg               string `toml:"nick_fg"`
+	EncryptedIndicator   string `toml:"encrypted_indicator"`
 	UnencryptedIndicator string `toml:"unencrypted_indicator"`
-	SystemMessageFg     string `toml:"system_message_fg"`
-	TypingIndicatorFg   string `toml:"typing_indicator_fg"`
+	SystemMessageFg      string `toml:"system_message_fg"`
+	TypingIndicatorFg    string `toml:"typing_indicator_fg"`
 }
 
 // StatusBarConfig contains status bar styles
@@ -79,21 +79,21 @@ type StatusBarConfig struct {
 
 // CommandLineConfig contains command line styles
 type CommandLineConfig struct {
-	PromptFg   string `toml:"prompt_fg"`
-	InputFg    string `toml:"input_fg"`
-	InputBg    string `toml:"input_bg"`
-	CursorFg   string `toml:"cursor_fg"`
+	PromptFg     string `toml:"prompt_fg"`
+	InputFg      string `toml:"input_fg"`
+	InputBg      string `toml:"input_bg"`
+	CursorFg     string `toml:"cursor_fg"`
 	CompletionFg string `toml:"completion_fg"`
 	CompletionBg string `toml:"completion_bg"`
 }
 
 // DialogsConfig contains dialog styles
 type DialogsConfig struct {
-	BorderFg    string `toml:"border_fg"`
-	TitleFg     string `toml:"title_fg"`
-	ContentFg   string `toml:"content_fg"`
-	ButtonFg    string `toml:"button_fg"`
-	ButtonBg    string `toml:"button_bg"`
+	BorderFg       string `toml:"border_fg"`
+	TitleFg        string `toml:"title_fg"`
+	ContentFg      string `toml:"content_fg"`
+	ButtonFg       string `toml:"button_fg"`
+	ButtonBg       string `toml:"button_bg"`
 	ButtonActiveFg string `toml:"button_active_fg"`
 	ButtonActiveBg string `toml:"button_active_bg"`
 }
@@ -101,9 +101,9 @@ type DialogsConfig struct {
 // Styles contains the compiled lipgloss styles for a theme
 type Styles struct {
 	// Base styles
-	Base       lipgloss.Style
-	Focused    lipgloss.Style
-	Border     lipgloss.Style
+	Base    lipgloss.Style
+	Focused lipgloss.Style
+	Border  lipgloss.Style
 
 	// Roster styles
 	RosterHeader   lipgloss.Style
@@ -130,11 +130,11 @@ type Styles struct {
 	ChatTyping       lipgloss.Style
 
 	// Status bar styles
-	StatusBar        lipgloss.Style
-	StatusModeNormal lipgloss.Style
-	StatusModeInsert lipgloss.Style
+	StatusBar         lipgloss.Style
+	StatusModeNormal  lipgloss.Style
+	StatusModeInsert  lipgloss.Style
 	StatusModeCommand lipgloss.Style
-	StatusAccount    lipgloss.Style
+	StatusAccount     lipgloss.Style
 
 	// Command line styles
 	CommandPrompt     lipgloss.Style
@@ -142,14 +142,14 @@ type Styles struct {
 	CommandCompletion lipgloss.Style
 
 	// Dialog styles
-	DialogBorder lipgloss.Style
-	DialogTitle  lipgloss.Style
-	DialogContent lipgloss.Style
-	DialogButton lipgloss.Style
+	DialogBorder       lipgloss.Style
+	DialogTitle        lipgloss.Style
+	DialogContent      lipgloss.Style
+	DialogButton       lipgloss.Style
 	DialogButtonActive lipgloss.Style
 
 	// Input styles
-	InputNormal lipgloss.Style
+	InputNormal  lipgloss.Style
 	InputFocused lipgloss.Style
 
 	// Window styles
@@ -159,11 +159,11 @@ type Styles struct {
 
 // Manager handles theme loading and switching
 type Manager struct {
-	themes       map[string]*Theme
-	current      *Theme
-	currentName  string
-	styles       *Styles
-	themeDirs    []string
+	themes      map[string]*Theme
+	current     *Theme
+	currentName string
+	styles      *Styles
+	themeDirs   []string
 }
 
 // NewManager creates a new theme manager

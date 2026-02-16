@@ -2,6 +2,7 @@ package chat
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -9,6 +10,31 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/meszmate/roster/internal/ui/theme"
 )
+
+// MessageStatus represents the delivery status of a message
+type MessageStatus int
+
+const (
+	StatusNone      MessageStatus = iota // No status (incoming messages)
+	StatusSending                        // Being sent
+	StatusSent                           // Server received
+	StatusDelivered                      // Recipient received (XEP-0184)
+	StatusRead                           // Recipient read (XEP-0333)
+	StatusFailed                         // Send failed
+)
+
+// Spinner frames for the sending animation
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// SpinnerTickMsg is sent to animate the spinner
+type SpinnerTickMsg struct{}
+
+// SpinnerTick returns a command that sends a spinner tick after a delay
+func SpinnerTick() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return SpinnerTickMsg{}
+	})
+}
 
 // Message represents a chat message
 type Message struct {
@@ -21,6 +47,13 @@ type Message struct {
 	Read      bool
 	Type      string // chat, groupchat, system
 	Outgoing  bool
+	Status    MessageStatus // Delivery status for outgoing messages
+
+	// File transfer fields
+	FileURL  string // URL if message contains a file
+	FileName string // Extracted filename
+	FileSize int64  // Size in bytes if known
+	FileMIME string // MIME type if known
 }
 
 // SendMsg is sent when a message should be sent
@@ -31,25 +64,27 @@ type SendMsg struct {
 
 // Model represents the chat component
 type Model struct {
-	messages    []Message
-	jid         string
-	input       string
-	cursorPos   int
-	offset      int
-	width       int
-	height      int
-	styles      *theme.Styles
-	encrypted   bool
-	typing      bool
-	peerTyping  bool
-	searchQuery string
+	messages      []Message
+	jid           string
+	input         string
+	cursorPos     int
+	offset        int
+	width         int
+	height        int
+	styles        *theme.Styles
+	encrypted     bool
+	typing        bool
+	peerTyping    bool
+	searchQuery   string
 	searchMatches []int
-	searchIndex int
-	statusMsg   string  // Current activity/status message
+	searchIndex   int
+	statusMsg     string // Current activity/status message
+	spinnerIdx    int    // Current spinner frame index
+	selectedMsg   int    // Currently selected message index (for file operations)
 
 	// Chat header state
 	headerFocused  bool
-	headerSelected int              // 0=edit, 1=sharing, 2=verify, 3=details
+	headerSelected int                // 0=edit, 1=sharing, 2=verify, 3=details
 	contactData    *ContactDetailData // Contact info for header display
 }
 
@@ -288,9 +323,139 @@ func (m Model) HeaderSelectedAction() int {
 	return m.headerSelected
 }
 
+// statusIcon returns the status icon for a message
+func (m Model) statusIcon(status MessageStatus) string {
+	switch status {
+	case StatusSending:
+		return spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
+	case StatusSent:
+		return "✓"
+	case StatusDelivered:
+		return "✓✓"
+	case StatusRead:
+		return m.styles.PresenceOnline.Render("✓✓")
+	case StatusFailed:
+		return m.styles.PresenceDND.Render("✗")
+	default:
+		return ""
+	}
+}
+
+// hasSendingMessages checks if there are any messages being sent
+func (m Model) hasSendingMessages() bool {
+	for _, msg := range m.messages {
+		if msg.Status == StatusSending {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateMessageStatus updates the status of a message by ID
+func (m Model) UpdateMessageStatus(msgID string, status MessageStatus) Model {
+	for i, msg := range m.messages {
+		if msg.ID == msgID {
+			m.messages[i].Status = status
+			break
+		}
+	}
+	return m
+}
+
+// SelectedMessage returns the currently selected message (for file operations)
+func (m Model) SelectedMessage() *Message {
+	if m.selectedMsg >= 0 && m.selectedMsg < len(m.messages) {
+		return &m.messages[m.selectedMsg]
+	}
+	return nil
+}
+
+// SelectNextFileMessage selects the next message that contains a file
+func (m Model) SelectNextFileMessage() Model {
+	for i := m.selectedMsg + 1; i < len(m.messages); i++ {
+		if m.messages[i].FileURL != "" {
+			m.selectedMsg = i
+			return m
+		}
+	}
+	// Wrap around
+	for i := 0; i < m.selectedMsg; i++ {
+		if m.messages[i].FileURL != "" {
+			m.selectedMsg = i
+			return m
+		}
+	}
+	return m
+}
+
+// SelectPrevFileMessage selects the previous message that contains a file
+func (m Model) SelectPrevFileMessage() Model {
+	for i := m.selectedMsg - 1; i >= 0; i-- {
+		if m.messages[i].FileURL != "" {
+			m.selectedMsg = i
+			return m
+		}
+	}
+	// Wrap around
+	for i := len(m.messages) - 1; i > m.selectedMsg; i-- {
+		if m.messages[i].FileURL != "" {
+			m.selectedMsg = i
+			return m
+		}
+	}
+	return m
+}
+
+// extractFileURL extracts HTTPS URLs from message body
+func extractFileURL(body string) (string, bool) {
+	// Match HTTPS URLs only (security)
+	urlRegex := regexp.MustCompile(`https://[^\s<>"]+`)
+	match := urlRegex.FindString(body)
+	if match != "" {
+		return match, true
+	}
+	return "", false
+}
+
+// extractFileName extracts filename from URL
+func extractFileName(url string) string {
+	// Get the path after the last /
+	idx := strings.LastIndex(url, "/")
+	if idx >= 0 && idx < len(url)-1 {
+		name := url[idx+1:]
+		// Remove query parameters
+		if qIdx := strings.Index(name, "?"); qIdx > 0 {
+			name = name[:qIdx]
+		}
+		return name
+	}
+	return ""
+}
+
+// humanizeBytes converts bytes to human readable format
+func humanizeBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case SpinnerTickMsg:
+		m.spinnerIdx++
+		if m.hasSendingMessages() {
+			return m, SpinnerTick()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyRunes:
@@ -533,7 +698,13 @@ func (m Model) renderMessage(msg Message) []string {
 	}
 	nickStr := m.styles.ChatNick.Render(nick)
 
-	// Message body
+	// Status icon for outgoing messages
+	statusStr := ""
+	if msg.Outgoing && msg.Status != StatusNone {
+		statusStr = " " + m.statusIcon(msg.Status)
+	}
+
+	// Message body style
 	var bodyStyle lipgloss.Style
 	if msg.Outgoing {
 		bodyStyle = m.styles.ChatMyMessage
@@ -547,6 +718,11 @@ func (m Model) renderMessage(msg Message) []string {
 		return []string{line}
 	}
 
+	// Check if message contains a file URL
+	if msg.FileURL != "" || (msg.Body != "" && strings.HasPrefix(msg.Body, "https://")) {
+		return m.renderFileMessage(msg, timestamp, nickStr, statusStr)
+	}
+
 	// Word wrap message body
 	maxWidth := m.width - 15 // timestamp + nick + padding
 	if maxWidth < 10 {
@@ -557,13 +733,57 @@ func (m Model) renderMessage(msg Message) []string {
 	for i, line := range wrapped {
 		var formatted string
 		if i == 0 {
-			formatted = fmt.Sprintf("%s %s: %s", timestamp, nickStr, bodyStyle.Render(line))
+			formatted = fmt.Sprintf("%s %s: %s%s", timestamp, nickStr, bodyStyle.Render(line), statusStr)
 		} else {
 			padding := strings.Repeat(" ", 6+len(nick)+2)
 			formatted = padding + bodyStyle.Render(line)
 		}
 		lines = append(lines, formatted)
 	}
+
+	return lines
+}
+
+// renderFileMessage renders a message that contains a file URL
+func (m Model) renderFileMessage(msg Message, timestamp, nickStr, statusStr string) []string {
+	var lines []string
+
+	// Extract URL and filename
+	fileURL := msg.FileURL
+	if fileURL == "" {
+		if url, ok := extractFileURL(msg.Body); ok {
+			fileURL = url
+		}
+	}
+
+	fileName := msg.FileName
+	if fileName == "" {
+		fileName = extractFileName(fileURL)
+	}
+	if fileName == "" {
+		fileName = "file"
+	}
+
+	// First line: timestamp + nick + file icon
+	firstLine := fmt.Sprintf("%s %s: 📎 %s", timestamp, nickStr, fileName)
+	if msg.FileSize > 0 {
+		firstLine += fmt.Sprintf(" (%s)", humanizeBytes(msg.FileSize))
+	}
+	firstLine += statusStr
+	lines = append(lines, firstLine)
+
+	// Second line: URL (truncated if needed)
+	urlDisplay := fileURL
+	maxURLWidth := m.width - 10
+	if len(urlDisplay) > maxURLWidth && maxURLWidth > 20 {
+		urlDisplay = urlDisplay[:maxURLWidth-3] + "..."
+	}
+	urlLine := strings.Repeat(" ", 6+4+2) + m.styles.ChatSystem.Render(urlDisplay)
+	lines = append(lines, urlLine)
+
+	// Third line: actions hint
+	actionsLine := strings.Repeat(" ", 6+4+2) + m.styles.ChatTimestamp.Render("[o=open  c=copy URL]")
+	lines = append(lines, actionsLine)
 
 	return lines
 }
@@ -656,18 +876,18 @@ type AccountDetailData struct {
 
 // ContactDetailData holds data for rendering contact details
 type ContactDetailData struct {
-	JID            string
-	Name           string
-	Status         string // online, away, dnd, xa, offline
-	StatusMsg      string
-	Groups         []string
-	Subscription   string
-	MyPresence     string // Your custom presence for this contact (empty = default)
-	MyPresenceMsg  string
-	LastSeen       time.Time
-	StatusSharing  bool   // Whether you share your status with this contact
-	OMEMOEnabled   bool   // Whether OMEMO is enabled for this contact
-	Fingerprints   []FingerprintDisplay
+	JID           string
+	Name          string
+	Status        string // online, away, dnd, xa, offline
+	StatusMsg     string
+	Groups        []string
+	Subscription  string
+	MyPresence    string // Your custom presence for this contact (empty = default)
+	MyPresenceMsg string
+	LastSeen      time.Time
+	StatusSharing bool // Whether you share your status with this contact
+	OMEMOEnabled  bool // Whether OMEMO is enabled for this contact
+	Fingerprints  []FingerprintDisplay
 }
 
 // FingerprintDisplay holds fingerprint info for display
@@ -803,7 +1023,7 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	var b strings.Builder
 
 	// Header
-	header := "Contact Details"
+	header := "Roster Details"
 	b.WriteString(m.styles.ChatNick.Render(header))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", m.width-2))
@@ -878,15 +1098,15 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	}
 	b.WriteString(fmt.Sprintf("  Status sharing: %s\n", sharingStr))
 
-	// Your presence for this contact
+	// Your presence for this roster entry
 	if contact.MyPresence != "" {
 		presenceStr := contact.MyPresence
 		if contact.MyPresenceMsg != "" {
 			presenceStr += ": " + contact.MyPresenceMsg
 		}
-		b.WriteString(fmt.Sprintf("  Your presence for this contact: [%s]\n", presenceStr))
+		b.WriteString(fmt.Sprintf("  Your presence for this roster entry: [%s]\n", presenceStr))
 	} else {
-		b.WriteString("  Your presence for this contact: [default]\n")
+		b.WriteString("  Your presence for this roster entry: [default]\n")
 	}
 
 	b.WriteString("\n")
@@ -903,7 +1123,7 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	if len(contact.Fingerprints) > 0 {
 		b.WriteString("  Devices:\n")
 		for _, fp := range contact.Fingerprints {
-			trustStr := fp.Trust
+			var trustStr string
 			switch fp.Trust {
 			case "verified":
 				trustStr = m.styles.PresenceOnline.Render("[verified]")

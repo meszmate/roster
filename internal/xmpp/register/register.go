@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -58,23 +59,23 @@ type RegistrationResult struct {
 
 // Common field names used in XEP-0077
 var fieldLabels = map[string]string{
-	"username":  "Username",
-	"password":  "Password",
-	"email":     "Email",
-	"name":      "Full Name",
-	"first":     "First Name",
-	"last":      "Last Name",
-	"nick":      "Nickname",
-	"address":   "Address",
-	"city":      "City",
-	"state":     "State",
-	"zip":       "ZIP Code",
-	"phone":     "Phone",
-	"url":       "Website",
-	"date":      "Date",
-	"misc":      "Miscellaneous",
-	"text":      "Text",
-	"key":       "Key",
+	"username":   "Username",
+	"password":   "Password",
+	"email":      "Email",
+	"name":       "Full Name",
+	"first":      "First Name",
+	"last":       "Last Name",
+	"nick":       "Nickname",
+	"address":    "Address",
+	"city":       "City",
+	"state":      "State",
+	"zip":        "ZIP Code",
+	"phone":      "Phone",
+	"url":        "Website",
+	"date":       "Date",
+	"misc":       "Miscellaneous",
+	"text":       "Text",
+	"key":        "Key",
 	"registered": "Already Registered",
 }
 
@@ -92,7 +93,7 @@ type streamFeatures struct {
 }
 
 type startTLS struct {
-	XMLName  xml.Name `xml:"starttls"`
+	XMLName  xml.Name  `xml:"starttls"`
 	Required *struct{} `xml:"required"`
 }
 
@@ -107,37 +108,37 @@ type registerFeature struct {
 
 // iqStanza represents an IQ stanza
 type iqStanza struct {
-	XMLName xml.Name `xml:"iq"`
-	Type    string   `xml:"type,attr"`
-	ID      string   `xml:"id,attr"`
-	To      string   `xml:"to,attr,omitempty"`
-	From    string   `xml:"from,attr,omitempty"`
+	XMLName xml.Name       `xml:"iq"`
+	Type    string         `xml:"type,attr"`
+	ID      string         `xml:"id,attr"`
+	To      string         `xml:"to,attr,omitempty"`
+	From    string         `xml:"from,attr,omitempty"`
 	Query   *registerQuery `xml:"query,omitempty"`
 	Error   *stanzaError   `xml:"error,omitempty"`
 }
 
 type registerQuery struct {
-	XMLName      xml.Name `xml:"query"`
-	XMLNS        string   `xml:"xmlns,attr"`
-	Instructions string   `xml:"instructions,omitempty"`
-	Username     *string  `xml:"username,omitempty"`
-	Password     *string  `xml:"password,omitempty"`
-	Email        *string  `xml:"email,omitempty"`
-	Name         *string  `xml:"name,omitempty"`
-	First        *string  `xml:"first,omitempty"`
-	Last         *string  `xml:"last,omitempty"`
-	Nick         *string  `xml:"nick,omitempty"`
-	Address      *string  `xml:"address,omitempty"`
-	City         *string  `xml:"city,omitempty"`
-	State        *string  `xml:"state,omitempty"`
-	Zip          *string  `xml:"zip,omitempty"`
-	Phone        *string  `xml:"phone,omitempty"`
-	URL          *string  `xml:"url,omitempty"`
-	Date         *string  `xml:"date,omitempty"`
-	Misc         *string  `xml:"misc,omitempty"`
-	Text         *string  `xml:"text,omitempty"`
-	Key          *string  `xml:"key,omitempty"`
-	Registered   *struct{} `xml:"registered,omitempty"`
+	XMLName      xml.Name   `xml:"query"`
+	XMLNS        string     `xml:"xmlns,attr"`
+	Instructions string     `xml:"instructions,omitempty"`
+	Username     *string    `xml:"username,omitempty"`
+	Password     *string    `xml:"password,omitempty"`
+	Email        *string    `xml:"email,omitempty"`
+	Name         *string    `xml:"name,omitempty"`
+	First        *string    `xml:"first,omitempty"`
+	Last         *string    `xml:"last,omitempty"`
+	Nick         *string    `xml:"nick,omitempty"`
+	Address      *string    `xml:"address,omitempty"`
+	City         *string    `xml:"city,omitempty"`
+	State        *string    `xml:"state,omitempty"`
+	Zip          *string    `xml:"zip,omitempty"`
+	Phone        *string    `xml:"phone,omitempty"`
+	URL          *string    `xml:"url,omitempty"`
+	Date         *string    `xml:"date,omitempty"`
+	Misc         *string    `xml:"misc,omitempty"`
+	Text         *string    `xml:"text,omitempty"`
+	Key          *string    `xml:"key,omitempty"`
+	Registered   *struct{}  `xml:"registered,omitempty"`
 	XData        *xDataForm `xml:"x,omitempty"`
 	BobData      []bobData  `xml:"data,omitempty"`
 }
@@ -153,14 +154,14 @@ type xDataForm struct {
 }
 
 type xDataField struct {
-	XMLName  xml.Name       `xml:"field"`
-	Var      string         `xml:"var,attr,omitempty"`
-	Type     string         `xml:"type,attr,omitempty"`
-	Label    string         `xml:"label,attr,omitempty"`
-	Required *struct{}      `xml:"required,omitempty"`
-	Value    []string       `xml:"value"`
-	Options  []xDataOption  `xml:"option,omitempty"`
-	Media    *mediaElement  `xml:"media,omitempty"`
+	XMLName  xml.Name      `xml:"field"`
+	Var      string        `xml:"var,attr,omitempty"`
+	Type     string        `xml:"type,attr,omitempty"`
+	Label    string        `xml:"label,attr,omitempty"`
+	Required *struct{}     `xml:"required,omitempty"`
+	Value    []string      `xml:"value"`
+	Options  []xDataOption `xml:"option,omitempty"`
+	Media    *mediaElement `xml:"media,omitempty"`
 }
 
 type xDataOption struct {
@@ -215,9 +216,9 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 
 	// Set deadline for the entire operation
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
 	} else {
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
 	// Send initial stream header
@@ -248,7 +249,7 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 		}
 
 		// Read new features
-		features, err = readStreamFeatures(decoder)
+		_, err = readStreamFeatures(decoder)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read stream features after TLS: %w", err)
 		}
@@ -280,7 +281,7 @@ func FetchRegistrationForm(ctx context.Context, server string, port int) (*Regis
 	}
 
 	// Close stream
-	conn.Write([]byte("</stream:stream>"))
+	_, _ = conn.Write([]byte("</stream:stream>"))
 
 	return form, nil
 }
@@ -303,9 +304,9 @@ func SubmitRegistration(ctx context.Context, server string, port int, fields map
 
 	// Set deadline for the entire operation
 	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+		_ = conn.SetDeadline(deadline)
 	} else {
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
 	// Send initial stream header
@@ -361,7 +362,7 @@ func SubmitRegistration(ctx context.Context, server string, port int, fields map
 	}
 
 	// Close stream
-	conn.Write([]byte("</stream:stream>"))
+	_, _ = conn.Write([]byte("</stream:stream>"))
 
 	return result, nil
 }
@@ -460,7 +461,7 @@ func readRegistrationForm(decoder *xml.Decoder, server string, port int) (*Regis
 					if iq.Error != nil {
 						errMsg = parseErrorCondition(iq.Error)
 					}
-					return nil, fmt.Errorf(errMsg)
+					return nil, errors.New(errMsg)
 				}
 
 				if iq.Type == "result" && iq.Query != nil {

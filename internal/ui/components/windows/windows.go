@@ -52,28 +52,41 @@ func (m Model) OpenChat(jid string) Model {
 
 // OpenChatWithAccount opens a new chat window for a JID with a specific account
 func (m Model) OpenChatWithAccount(jid, accountJID string) Model {
+	m, _ = m.OpenChatWithAccountResult(jid, accountJID)
+	return m
+}
+
+// OpenChatResult opens a chat window and returns success/failure
+func (m Model) OpenChatResult(jid string) (Model, bool) {
+	return m.OpenChatWithAccountResult(jid, "")
+}
+
+// OpenChatWithAccountResult opens a chat window with a specific account and returns success/failure
+func (m Model) OpenChatWithAccountResult(jid, accountJID string) (Model, bool) {
 	// Check if window already exists
 	for i, w := range m.windows {
 		if w.JID == jid {
 			m.active = i
-			return m
+			return m, true
 		}
+	}
+
+	// Check if max windows reached
+	if len(m.windows) >= m.maxWindows {
+		return m, false
 	}
 
 	// Create new window
-	if len(m.windows) < m.maxWindows {
-		window := Window{
-			ID:         len(m.windows),
-			Type:       WindowChat,
-			JID:        jid,
-			Title:      jid,
-			AccountJID: accountJID,
-		}
-		m.windows = append(m.windows, window)
-		m.active = len(m.windows) - 1
+	window := Window{
+		ID:         len(m.windows),
+		Type:       WindowChat,
+		JID:        jid,
+		Title:      jid,
+		AccountJID: accountJID,
 	}
-
-	return m
+	m.windows = append(m.windows, window)
+	m.active = len(m.windows) - 1
+	return m, true
 }
 
 // OpenMUC opens a new MUC window

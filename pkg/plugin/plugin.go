@@ -106,10 +106,10 @@ type CommandsAPI interface {
 
 // Contact represents a roster contact
 type Contact struct {
-	JID      string
-	Name     string
-	Groups   []string
-	Status   string
+	JID       string
+	Name      string
+	Groups    []string
+	Status    string
 	StatusMsg string
 }
 

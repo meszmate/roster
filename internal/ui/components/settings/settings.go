@@ -68,20 +68,26 @@ type SaveMsg struct {
 	Config *config.Config
 }
 
+// ConfirmSaveMessagesMsg is sent when user tries to enable message saving
+type ConfirmSaveMessagesMsg struct{}
+
+// EnableSaveMessagesMsg is sent to actually enable message saving after confirmation
+type EnableSaveMessagesMsg struct{}
+
 // Model represents the settings component
 type Model struct {
-	cfg           *config.Config
-	section       Section
-	settings      []Setting
-	selected      int
-	editing       bool
-	editValue     string
-	editCursor    int
-	width         int
-	height        int
-	styles        *theme.Styles
-	changed       bool
-	themes        []string
+	cfg        *config.Config
+	section    Section
+	settings   []Setting
+	selected   int
+	editing    bool
+	editValue  string
+	editCursor int
+	width      int
+	height     int
+	styles     *theme.Styles
+	changed    bool
+	themes     []string
 }
 
 // New creates a new settings model
@@ -105,11 +111,18 @@ func (m *Model) loadSettings() {
 	case SectionGeneral:
 		m.settings = []Setting{
 			{
-				Key:         "auto_connect",
-				Label:       "Auto Connect",
-				Description: "Automatically connect on startup",
+				Key:         "save_messages",
+				Label:       "Save Messages",
+				Description: "Save chat messages to database (requires confirmation)",
 				Type:        SettingBool,
-				Value:       m.cfg.General.AutoConnect,
+				Value:       m.cfg.Storage.SaveMessages,
+			},
+			{
+				Key:         "save_window_state",
+				Label:       "Save Window State",
+				Description: "Remember open windows between sessions",
+				Type:        SettingBool,
+				Value:       m.cfg.Storage.SaveWindowState,
 			},
 		}
 
@@ -314,6 +327,13 @@ func (m Model) handleNormalMode(msg tea.KeyMsg) (Model, tea.Cmd) {
 			setting := &m.settings[m.selected]
 			switch setting.Type {
 			case SettingBool:
+				// Check if trying to enable save_messages - requires confirmation
+				if setting.Key == "save_messages" && !setting.Value.(bool) {
+					// Emit message to show confirmation dialog
+					return m, func() tea.Msg {
+						return ConfirmSaveMessagesMsg{}
+					}
+				}
 				// Toggle boolean
 				setting.Value = !setting.Value.(bool)
 				m.changed = true
@@ -368,7 +388,7 @@ func (m Model) handleEditMode(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if setting.Type == SettingNumber {
 				// Parse number
 				var num int
-				fmt.Sscanf(m.editValue, "%d", &num)
+				_, _ = fmt.Sscanf(m.editValue, "%d", &num)
 				if num < setting.Min {
 					num = setting.Min
 				}
@@ -411,10 +431,6 @@ func (m Model) handleEditMode(msg tea.KeyMsg) (Model, tea.Cmd) {
 // applyChange applies a setting change to the config
 func (m *Model) applyChange(setting *Setting) {
 	switch setting.Key {
-	// General
-	case "auto_connect":
-		m.cfg.General.AutoConnect = setting.Value.(bool)
-
 	// UI
 	case "theme":
 		m.cfg.UI.Theme = setting.Value.(string)
@@ -450,6 +466,12 @@ func (m *Model) applyChange(setting *Setting) {
 		m.cfg.Plugins.Enabled = cleaned
 	case "plugin_dir":
 		m.cfg.Plugins.PluginDir = setting.Value.(string)
+
+	// Storage
+	case "save_messages":
+		m.cfg.Storage.SaveMessages = setting.Value.(bool)
+	case "save_window_state":
+		m.cfg.Storage.SaveWindowState = setting.Value.(bool)
 	}
 }
 
@@ -576,4 +598,18 @@ func (m Model) HasChanges() bool {
 // Config returns the current config
 func (m Model) Config() *config.Config {
 	return m.cfg
+}
+
+// EnableSaveMessages enables message saving after user confirmation
+func (m Model) EnableSaveMessages() Model {
+	m.cfg.Storage.SaveMessages = true
+	m.changed = true
+	// Update the setting value in the current view if in General section
+	for i := range m.settings {
+		if m.settings[i].Key == "save_messages" {
+			m.settings[i].Value = true
+			break
+		}
+	}
+	return m
 }

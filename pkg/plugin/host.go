@@ -23,11 +23,11 @@ type Host struct {
 
 // LoadedPlugin represents a loaded plugin
 type LoadedPlugin struct {
-	Name     string
-	Version  string
-	Plugin   Plugin
-	Client   *plugin.Client
-	Running  bool
+	Name    string
+	Version string
+	Plugin  Plugin
+	Client  *plugin.Client
+	Running bool
 }
 
 // Handshake is the plugin handshake config

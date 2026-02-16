@@ -173,6 +173,10 @@ const (
 
 	// Chat header focus
 	ActionFocusHeader
+
+	// File handling
+	ActionOpenFileURL
+	ActionCopyFileURL
 )
 
 // KeyBinding represents a key binding
@@ -238,35 +242,35 @@ func (m *Manager) setupDefaultBindings() {
 		"escape": ActionExitMode,
 
 		// Selection
-		"enter":  ActionOpenChat,
-		"o":      ActionOpenChat,
-		"q":      ActionCloseChat,
+		"enter": ActionOpenChat,
+		"o":     ActionOpenChat,
+		"q":     ActionCloseChat,
 
 		// Search
-		"n":      ActionSearchNext,
-		"N":      ActionSearchPrev,
+		"n": ActionSearchNext,
+		"N": ActionSearchPrev,
 
 		// Windows (Alt+1-0, Alt+q-p for windows 11-20)
-		"alt+1":  ActionWindow1,
-		"alt+2":  ActionWindow2,
-		"alt+3":  ActionWindow3,
-		"alt+4":  ActionWindow4,
-		"alt+5":  ActionWindow5,
-		"alt+6":  ActionWindow6,
-		"alt+7":  ActionWindow7,
-		"alt+8":  ActionWindow8,
-		"alt+9":  ActionWindow9,
-		"alt+0":  ActionWindow10,
-		"alt+q":  ActionWindow11,
-		"alt+w":  ActionWindow12,
-		"alt+e":  ActionWindow13,
-		"alt+r":  ActionWindow14,
-		"alt+t":  ActionWindow15,
-		"alt+y":  ActionWindow16,
-		"alt+u":  ActionWindow17,
-		"alt+i":  ActionWindow18,
-		"alt+o":  ActionWindow19,
-		"alt+p":  ActionWindow20,
+		"alt+1": ActionWindow1,
+		"alt+2": ActionWindow2,
+		"alt+3": ActionWindow3,
+		"alt+4": ActionWindow4,
+		"alt+5": ActionWindow5,
+		"alt+6": ActionWindow6,
+		"alt+7": ActionWindow7,
+		"alt+8": ActionWindow8,
+		"alt+9": ActionWindow9,
+		"alt+0": ActionWindow10,
+		"alt+q": ActionWindow11,
+		"alt+w": ActionWindow12,
+		"alt+e": ActionWindow13,
+		"alt+r": ActionWindow14,
+		"alt+t": ActionWindow15,
+		"alt+y": ActionWindow16,
+		"alt+u": ActionWindow17,
+		"alt+i": ActionWindow18,
+		"alt+o": ActionWindow19,
+		"alt+p": ActionWindow20,
 
 		// Tab navigation
 		"tab":       ActionNextWindow,
@@ -275,82 +279,86 @@ func (m *Manager) setupDefaultBindings() {
 		"gT":        ActionPrevWindow,
 
 		// UI
-		"ctrl+r":    ActionToggleRoster,
-		"ctrl+h":    ActionToggleHelp,
-		"ctrl+l":    ActionRefresh,
-		"ctrl+c":    ActionQuit,
-		"ZZ":        ActionQuit,
-		"ZQ":        ActionQuit,
+		"ctrl+r": ActionToggleRoster,
+		"ctrl+h": ActionToggleHelp,
+		"ctrl+l": ActionRefresh,
+		"ctrl+c": ActionQuit,
+		"ZZ":     ActionQuit,
+		"ZQ":     ActionQuit,
 
 		// Actions
-		"dd":       ActionDeleteLine,
-		"u":        ActionUndo,
-		"ctrl+r_":  ActionRedo,
-		"yy":       ActionYank,
-		"p":        ActionPaste,
-		"m":        ActionMark,
-		"'":        ActionJumpToMark,
+		"dd":      ActionDeleteLine,
+		"u":       ActionUndo,
+		"ctrl+r_": ActionRedo,
+		"yy":      ActionYank,
+		"p":       ActionPaste,
+		"m":       ActionMark,
+		"'":       ActionJumpToMark,
 
 		// Roster actions (avoiding ctrl+a for tmux users)
-		"ga":       ActionAddContact,    // 'g' prefix + 'a' for add
-		"gx":       ActionRemoveContact, // 'g' prefix + 'x' for remove
-		"gR":       ActionRenameContact, // 'g' prefix + 'R' for rename (capital)
-		"gi":       ActionShowInfo,      // 'g' prefix + 'i' for info
+		"ga": ActionAddContact,    // 'g' prefix + 'a' for add
+		"gx": ActionRemoveContact, // 'g' prefix + 'x' for remove
+		"gR": ActionRenameContact, // 'g' prefix + 'R' for rename (capital)
+		"gi": ActionShowInfo,      // 'g' prefix + 'i' for info
 
 		// MUC (avoiding ctrl conflicts for tmux)
-		"gj":       ActionJoinRoom,         // 'g' prefix + 'j' for join
-		"gC":       ActionCreateRoom,       // 'g' prefix + 'C' for create room
-		"gp":       ActionShowParticipants, // 'g' prefix + 'p' for participants
+		"gj": ActionJoinRoom,         // 'g' prefix + 'j' for join
+		"gC": ActionCreateRoom,       // 'g' prefix + 'C' for create room
+		"gp": ActionShowParticipants, // 'g' prefix + 'p' for participants
 
 		// Settings
-		"gs":       ActionShowSettings, // 'g' prefix + 's' for settings
-		"S":        ActionShowSettings,
+		"gs": ActionShowSettings, // 'g' prefix + 's' for settings
+		"S":  ActionShowSettings,
 
 		// Window management
-		"gw":       ActionSaveWindows,  // 'g' prefix + 'w' for save windows
+		"gw": ActionSaveWindows, // 'g' prefix + 'w' for save windows
 
 		// Focus keybindings
-		"gr":       ActionFocusRoster,       // 'g' prefix + 'r' for roster focus
-		"gc":       ActionFocusChat,         // 'g' prefix + 'c' for chat focus
-		"gA":       ActionFocusAccounts,     // 'g' prefix + 'A' for accounts focus
-		"gl":       ActionToggleAccountList, // 'g' prefix + 'l' for account list toggle
+		"gr": ActionFocusRoster,       // 'g' prefix + 'r' for roster focus
+		"gc": ActionFocusChat,         // 'g' prefix + 'c' for chat focus
+		"gA": ActionFocusAccounts,     // 'g' prefix + 'A' for accounts focus
+		"gl": ActionToggleAccountList, // 'g' prefix + 'l' for account list toggle
 
 		// Context help
-		"H":        ActionShowContextHelp,   // Show context-sensitive help/info popup
+		"H": ActionShowContextHelp, // Show context-sensitive help/info popup
 
 		// Account actions (work when focused on accounts section)
-		"C":        ActionAccountConnect,    // Connect to selected account
-		"D":        ActionAccountDisconnect, // Disconnect selected account
-		"X":        ActionAccountRemove,     // Remove selected account (with confirmation)
-		"E":        ActionAccountEdit,       // Edit selected account
-		"T":        ActionToggleAutoConnect, // Toggle auto-connect for selected account
+		"C": ActionAccountConnect,    // Connect to selected account
+		"D": ActionAccountDisconnect, // Disconnect selected account
+		"X": ActionAccountRemove,     // Remove selected account (with confirmation)
+		"E": ActionAccountEdit,       // Edit selected account
+		"T": ActionToggleAutoConnect, // Toggle auto-connect for selected account
 
 		// Multi-account window binding
-		"space":    ActionSetWindowAccount,  // Bind selected account to current window
+		"space": ActionSetWindowAccount, // Bind selected account to current window
 
 		// Status sharing (in contact details)
-		"s":        ActionToggleStatusSharing, // Toggle status sharing for contact
+		"s": ActionToggleStatusSharing, // Toggle status sharing for contact
 
 		// Fingerprint verification (in contact details)
-		"v":        ActionVerifyFingerprint,   // Verify fingerprint
+		"v": ActionVerifyFingerprint, // Verify fingerprint
 
 		// Chat header focus
-		"gh":       ActionFocusHeader,         // Focus chat header for contact actions
+		"gh": ActionFocusHeader, // Focus chat header for contact actions
+
+		// File handling (in chat view)
+		"go": ActionOpenFileURL, // Open selected file URL
+		"gO": ActionCopyFileURL, // Copy file URL to clipboard
 	}
 
 	// Insert mode bindings
 	m.bindings[ModeInsert] = map[string]Action{
-		"escape":    ActionExitMode,
-		"ctrl+c":    ActionExitMode,
-		"enter":     ActionSendMessage,
+		"escape":      ActionExitMode,
+		"ctrl+c":      ActionExitMode,
+		"enter":       ActionSendMessage,
 		"shift+enter": ActionNewLine,
-		"ctrl+e":    ActionCycleEncryption,
-		"up":        ActionMoveUp,
-		"down":      ActionMoveDown,
-		"ctrl+u":    ActionDeleteLine,
-		"ctrl+w":    ActionDeleteWord,
-		"ctrl+h":    ActionDeleteChar,
-		"backspace": ActionDeleteChar,
+		"ctrl+e":      ActionCycleEncryption,
+		"up":          ActionMoveUp,
+		"down":        ActionMoveDown,
+		"ctrl+u":      ActionDeleteLine,
+		"ctrl+w":      ActionDeleteWord,
+		"ctrl+h":      ActionDeleteChar,
+		"backspace":   ActionDeleteChar,
 	}
 
 	// Command mode bindings
@@ -602,25 +610,25 @@ func parseInt(s string) int {
 // ActionName returns a human-readable name for an action
 func ActionName(action Action) string {
 	names := map[Action]string{
-		ActionNone:              "none",
-		ActionMoveUp:            "move up",
-		ActionMoveDown:          "move down",
-		ActionMoveLeft:          "move left",
-		ActionMoveRight:         "move right",
-		ActionMoveTop:           "move to top",
-		ActionMoveBottom:        "move to bottom",
-		ActionPageUp:            "page up",
-		ActionPageDown:          "page down",
-		ActionHalfPageUp:        "half page up",
-		ActionHalfPageDown:      "half page down",
-		ActionEnterInsert:       "enter insert mode",
-		ActionEnterCommand:      "enter command mode",
-		ActionEnterSearch:       "search",
-		ActionExitMode:          "exit mode",
-		ActionOpenChat:          "open chat",
-		ActionCloseChat:         "close chat",
-		ActionSendMessage:       "send message",
-		ActionQuit:              "quit",
+		ActionNone:         "none",
+		ActionMoveUp:       "move up",
+		ActionMoveDown:     "move down",
+		ActionMoveLeft:     "move left",
+		ActionMoveRight:    "move right",
+		ActionMoveTop:      "move to top",
+		ActionMoveBottom:   "move to bottom",
+		ActionPageUp:       "page up",
+		ActionPageDown:     "page down",
+		ActionHalfPageUp:   "half page up",
+		ActionHalfPageDown: "half page down",
+		ActionEnterInsert:  "enter insert mode",
+		ActionEnterCommand: "enter command mode",
+		ActionEnterSearch:  "search",
+		ActionExitMode:     "exit mode",
+		ActionOpenChat:     "open chat",
+		ActionCloseChat:    "close chat",
+		ActionSendMessage:  "send message",
+		ActionQuit:         "quit",
 	}
 	if name, ok := names[action]; ok {
 		return name

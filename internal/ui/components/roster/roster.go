@@ -9,8 +9,8 @@ import (
 	"github.com/meszmate/roster/internal/ui/theme"
 )
 
-// Contact represents a roster contact
-type Contact struct {
+// Roster represents a roster entry (contact)
+type Roster struct {
 	JID          string
 	Name         string
 	Groups       []string
@@ -19,6 +19,7 @@ type Contact struct {
 	Unread       int
 	AccountJID   string // Which account owns this contact
 	StatusHidden bool   // True if we don't share status with this contact
+	Subscription string // "none", "to", "from", "both"
 }
 
 // AccountDisplay represents an account for display in the sidebar
@@ -55,34 +56,34 @@ type AccountSelectMsg struct {
 
 // Model represents the roster component
 type Model struct {
-	contacts    []Contact
-	groups      map[string][]Contact
-	selected    int
-	offset      int
-	width       int
-	height      int
-	styles      *theme.Styles
-	showGroups  bool
+	rosters        []Roster
+	groups         map[string][]Roster
+	selected       int
+	offset         int
+	width          int
+	height         int
+	styles         *theme.Styles
+	showGroups     bool
 	expandedGroups map[string]bool
-	searchQuery string
-	searchMatches []int
-	searchIndex int
+	searchQuery    string
+	searchMatches  []int
+	searchIndex    int
 
 	// Account section
-	accounts           []AccountDisplay
-	showAccountList    bool    // Full account list mode
-	accountSelected    int     // Selection in account section
-	accountOffset      int     // Scroll offset for accounts
-	focusSection       Section // Contacts or Accounts
-	maxVisibleAccounts int     // Maximum visible accounts when not focused
-	maxExpandedAccounts int    // Maximum visible accounts when focused (auto-expand)
+	accounts            []AccountDisplay
+	showAccountList     bool    // Full account list mode
+	accountSelected     int     // Selection in account section
+	accountOffset       int     // Scroll offset for accounts
+	focusSection        Section // Contacts or Accounts
+	maxVisibleAccounts  int     // Maximum visible accounts when not focused
+	maxExpandedAccounts int     // Maximum visible accounts when focused (auto-expand)
 }
 
 // New creates a new roster model
 func New(styles *theme.Styles) Model {
 	return Model{
-		contacts:            []Contact{},
-		groups:              make(map[string][]Contact),
+		rosters:             []Roster{},
+		groups:              make(map[string][]Roster),
 		styles:              styles,
 		showGroups:          true,
 		expandedGroups:      make(map[string]bool),
@@ -93,18 +94,23 @@ func New(styles *theme.Styles) Model {
 	}
 }
 
-// SetContacts sets the roster contacts
-func (m Model) SetContacts(contacts []Contact) Model {
-	m.contacts = contacts
-	m.groups = make(map[string][]Contact)
+// SetContacts sets the roster entries (alias for SetRosters for compatibility)
+func (m Model) SetContacts(rosters []Roster) Model {
+	return m.SetRosters(rosters)
+}
 
-	// Group contacts
-	for _, c := range contacts {
-		if len(c.Groups) == 0 {
-			m.groups["Ungrouped"] = append(m.groups["Ungrouped"], c)
+// SetRosters sets the roster entries
+func (m Model) SetRosters(rosters []Roster) Model {
+	m.rosters = rosters
+	m.groups = make(map[string][]Roster)
+
+	// Group rosters
+	for _, r := range rosters {
+		if len(r.Groups) == 0 {
+			m.groups["Ungrouped"] = append(m.groups["Ungrouped"], r)
 		} else {
-			for _, g := range c.Groups {
-				m.groups[g] = append(m.groups[g], c)
+			for _, g := range r.Groups {
+				m.groups[g] = append(m.groups[g], r)
 			}
 		}
 	}
@@ -117,33 +123,33 @@ func (m Model) SetContacts(contacts []Contact) Model {
 	return m
 }
 
-// UpdatePresence updates a contact's presence status
+// UpdatePresence updates a roster entry's presence status
 func (m Model) UpdatePresence(jid, status string) Model {
-	for i, c := range m.contacts {
-		if c.JID == jid {
-			m.contacts[i].Status = status
+	for i, r := range m.rosters {
+		if r.JID == jid {
+			m.rosters[i].Status = status
 			break
 		}
 	}
 	return m
 }
 
-// UpdatePresenceMessage updates a contact's status message
+// UpdatePresenceMessage updates a roster entry's status message
 func (m Model) UpdatePresenceMessage(jid, statusMsg string) Model {
-	for i, c := range m.contacts {
-		if c.JID == jid {
-			m.contacts[i].StatusMsg = statusMsg
+	for i, r := range m.rosters {
+		if r.JID == jid {
+			m.rosters[i].StatusMsg = statusMsg
 			break
 		}
 	}
 	return m
 }
 
-// SetContactStatusHidden sets the StatusHidden flag for a contact
+// SetContactStatusHidden sets the StatusHidden flag for a roster entry
 func (m Model) SetContactStatusHidden(jid string, hidden bool) Model {
-	for i, c := range m.contacts {
-		if c.JID == jid {
-			m.contacts[i].StatusHidden = hidden
+	for i, r := range m.rosters {
+		if r.JID == jid {
+			m.rosters[i].StatusHidden = hidden
 			break
 		}
 	}
@@ -190,7 +196,6 @@ func (m Model) ToggleAccountList() Model {
 	return m
 }
 
-
 // IsAccountListExpanded returns whether the account list is expanded
 func (m Model) IsAccountListExpanded() bool {
 	return m.showAccountList
@@ -233,8 +238,8 @@ func (m Model) MoveUp() Model {
 			// Move to contacts section
 			m.focusSection = SectionContacts
 			m.accountOffset = 0 // Reset offset when leaving accounts
-			if len(m.contacts) > 0 {
-				m.selected = len(m.contacts) - 1
+			if len(m.rosters) > 0 {
+				m.selected = len(m.rosters) - 1
 				// Adjust offset to show selected
 				if m.selected >= m.offset+m.getContactsHeight()-2 {
 					m.offset = m.selected - m.getContactsHeight() + 3
@@ -257,7 +262,7 @@ func (m Model) MoveUp() Model {
 func (m Model) MoveDown() Model {
 	if m.focusSection == SectionContacts {
 		// In contacts section
-		if m.selected < len(m.contacts)-1 {
+		if m.selected < len(m.rosters)-1 {
 			m.selected++
 			if m.selected >= m.offset+m.getContactsHeight()-2 {
 				m.offset = m.selected - m.getContactsHeight() + 3
@@ -297,7 +302,7 @@ func (m Model) MoveToTop() Model {
 
 // MoveToBottom moves selection to the bottom
 func (m Model) MoveToBottom() Model {
-	m.selected = len(m.contacts) - 1
+	m.selected = len(m.rosters) - 1
 	if m.selected < 0 {
 		m.selected = 0
 	}
@@ -328,14 +333,14 @@ func (m Model) PageUp() Model {
 func (m Model) PageDown() Model {
 	pageSize := m.height / 2
 	m.selected += pageSize
-	if m.selected >= len(m.contacts) {
-		m.selected = len(m.contacts) - 1
+	if m.selected >= len(m.rosters) {
+		m.selected = len(m.rosters) - 1
 	}
 	if m.selected < 0 {
 		m.selected = 0
 	}
 	m.offset += pageSize
-	maxOffset := len(m.contacts) - m.height + 2
+	maxOffset := len(m.rosters) - m.height + 2
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -345,10 +350,10 @@ func (m Model) PageDown() Model {
 	return m
 }
 
-// SelectedJID returns the JID of the selected contact
+// SelectedJID returns the JID of the selected roster entry
 func (m Model) SelectedJID() string {
-	if m.selected >= 0 && m.selected < len(m.contacts) {
-		return m.contacts[m.selected].JID
+	if m.selected >= 0 && m.selected < len(m.rosters) {
+		return m.rosters[m.selected].JID
 	}
 	return ""
 }
@@ -403,13 +408,13 @@ func (m Model) SearchPrev(query string) Model {
 	return m
 }
 
-// findMatches finds all contacts matching the query
+// findMatches finds all roster entries matching the query
 func (m Model) findMatches(query string) []int {
 	var matches []int
 	query = strings.ToLower(query)
-	for i, c := range m.contacts {
-		name := strings.ToLower(c.Name)
-		jid := strings.ToLower(c.JID)
+	for i, r := range m.rosters {
+		name := strings.ToLower(r.Name)
+		jid := strings.ToLower(r.JID)
 		if strings.Contains(name, query) || strings.Contains(jid, query) {
 			matches = append(matches, i)
 		}
@@ -525,11 +530,11 @@ func (m Model) View() string {
 		visibleHeight = 1
 	}
 
-	// Show help message if no contacts
-	if len(m.contacts) == 0 {
+	// Show help message if no roster entries
+	if len(m.rosters) == 0 {
 		helpLines := []string{
 			"",
-			"No contacts yet",
+			"Roster is empty",
 			"",
 			"Getting Started:",
 			"  :account add - Add account",
@@ -537,7 +542,7 @@ func (m Model) View() string {
 			"  :help        - All commands",
 			"",
 			"Quick Keys:",
-			"  ga  Add contact",
+			"  ga  Add to roster",
 			"  gj  Join room",
 			"  gs  Settings",
 			"  :1  Window 1",
@@ -570,10 +575,10 @@ func (m Model) View() string {
 		if m.offset > 0 {
 			actualVisibleHeight-- // Reserve line for "↑N more"
 		}
-		hiddenBelow := len(m.contacts) - m.offset - actualVisibleHeight
+		hiddenBelow := len(m.rosters) - m.offset - actualVisibleHeight
 		if hiddenBelow > 0 {
 			actualVisibleHeight-- // Reserve line for "↓N more"
-			hiddenBelow = len(m.contacts) - m.offset - actualVisibleHeight
+			hiddenBelow = len(m.rosters) - m.offset - actualVisibleHeight
 		}
 
 		// Show "↑N more" indicator if there are hidden contacts above
@@ -583,11 +588,11 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 
-		// Render visible contacts
-		for i := m.offset; i < len(m.contacts) && i < m.offset+actualVisibleHeight; i++ {
-			c := m.contacts[i]
+		// Render visible roster entries
+		for i := m.offset; i < len(m.rosters) && i < m.offset+actualVisibleHeight; i++ {
+			r := m.rosters[i]
 			selected := i == m.selected && m.focusSection == SectionContacts
-			line := m.renderContact(c, selected)
+			line := m.renderRoster(r, selected)
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -599,17 +604,17 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 
-		// Pad remaining contact lines
-		contactsRendered := 0
-		if len(m.contacts) > 0 {
+		// Pad remaining roster lines
+		rostersRendered := 0
+		if len(m.rosters) > 0 {
 			end := m.offset + actualVisibleHeight
-			if end > len(m.contacts) {
-				end = len(m.contacts)
+			if end > len(m.rosters) {
+				end = len(m.rosters)
 			}
-			contactsRendered = end - m.offset
+			rostersRendered = end - m.offset
 		}
 		// Account for indicator lines in padding calculation
-		linesUsed := contactsRendered
+		linesUsed := rostersRendered
 		if m.offset > 0 {
 			linesUsed++
 		}
@@ -724,7 +729,6 @@ func (m Model) renderAccountsSection() string {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
-		globalIdx += endIdx - startIdx
 
 		// Show "↓N more" indicator if there are hidden accounts below
 		hiddenBelow := len(saved) - endIdx
@@ -890,22 +894,22 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 	}
 
 	// Combine lines
-	result := style.Width(m.width - 2).Render(line1) + "\n" + dimStyle.Width(m.width - 2).Render(statsLine)
+	result := style.Width(m.width-2).Render(line1) + "\n" + dimStyle.Width(m.width-2).Render(statsLine)
 	return result
 }
 
-// renderContact renders a single contact line
-func (m Model) renderContact(c Contact, selected bool) string {
+// renderRoster renders a single roster entry line
+func (m Model) renderRoster(r Roster, selected bool) string {
 	// Presence indicator
 	var presenceStyle lipgloss.Style
 	var indicator string
 
 	// If status is hidden, show "?" indicator in gray
-	if c.StatusHidden {
+	if r.StatusHidden {
 		presenceStyle = m.styles.RosterContact.Foreground(lipgloss.Color("242"))
 		indicator = "?"
 	} else {
-		switch c.Status {
+		switch r.Status {
 		case "online":
 			presenceStyle = m.styles.PresenceOnline
 			indicator = "●"
@@ -926,33 +930,33 @@ func (m Model) renderContact(c Contact, selected bool) string {
 
 	presence := presenceStyle.Render(indicator)
 
-	// Contact name
-	name := c.Name
+	// Roster entry name
+	name := r.Name
 	if name == "" {
-		name = c.JID
+		name = r.JID
 	}
 
-	// Build status suffix for non-online contacts with status message
+	// Build status suffix for non-online entries with status message
 	statusSuffix := ""
-	if c.StatusHidden {
-		// Show "(hidden)" for contacts where status is not shared
+	if r.StatusHidden {
+		// Show "(hidden)" for entries where status is not shared
 		statusSuffix = " (hidden)"
-	} else if c.StatusMsg != "" && c.Status != "online" {
+	} else if r.StatusMsg != "" && r.Status != "online" {
 		// Show abbreviated status with message: "(away: lunch)"
-		shortStatus := c.Status
-		if c.Status == "offline" {
+		shortStatus := r.Status
+		if r.Status == "offline" {
 			shortStatus = "off"
 		}
-		statusSuffix = fmt.Sprintf(" (%s: %s)", shortStatus, c.StatusMsg)
-	} else if c.StatusMsg != "" && c.Status == "online" {
+		statusSuffix = fmt.Sprintf(" (%s: %s)", shortStatus, r.StatusMsg)
+	} else if r.StatusMsg != "" && r.Status == "online" {
 		// Online with status message: just show the message
-		statusSuffix = fmt.Sprintf(" (%s)", c.StatusMsg)
+		statusSuffix = fmt.Sprintf(" (%s)", r.StatusMsg)
 	}
 
 	// Unread indicator
 	unread := ""
-	if c.Unread > 0 {
-		unread = fmt.Sprintf(" [%d]", c.Unread)
+	if r.Unread > 0 {
+		unread = fmt.Sprintf(" [%d]", r.Unread)
 	}
 
 	// Calculate available width for name + status
@@ -991,15 +995,10 @@ func (m Model) renderContact(c Contact, selected bool) string {
 
 	// Build the content
 	var content string
-	if c.Unread > 0 {
+	if r.Unread > 0 {
 		content = fmt.Sprintf(" %s %s%s", presence, displayText, m.styles.RosterUnread.Render(unread))
 	} else {
 		content = fmt.Sprintf(" %s %s", presence, displayText)
-	}
-
-	// Pad to width
-	if len(content) < m.width-2 {
-		content += strings.Repeat(" ", m.width-2-len(content))
 	}
 
 	return style.Width(m.width - 2).Render(content)

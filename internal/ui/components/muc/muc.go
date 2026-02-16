@@ -50,13 +50,13 @@ type Room struct {
 
 // Model represents the MUC component
 type Model struct {
-	rooms           map[string]*Room
-	activeRoom      string
+	rooms            map[string]*Room
+	activeRoom       string
 	showParticipants bool
 	participantWidth int
-	width           int
-	height          int
-	styles          *theme.Styles
+	width            int
+	height           int
+	styles           *theme.Styles
 }
 
 // New creates a new MUC model

@@ -9,12 +9,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// DB represents the SQLite database
 type DB struct {
 	db *sql.DB
 }
 
-// New creates a new SQLite database connection
 func New(dataDir string) (*DB, error) {
 	dbPath := filepath.Join(dataDir, "roster.db")
 
@@ -32,15 +30,12 @@ func New(dataDir string) (*DB, error) {
 	return store, nil
 }
 
-// Close closes the database connection
 func (d *DB) Close() error {
 	return d.db.Close()
 }
 
-// migrate runs database migrations
 func (d *DB) migrate() error {
 	migrations := []string{
-		// Messages table
 		`CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
 			account TEXT NOT NULL,
@@ -58,67 +53,6 @@ func (d *DB) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_messages_jid ON messages(account, jid)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)`,
 
-		// Roster cache
-		`CREATE TABLE IF NOT EXISTS roster (
-			account TEXT NOT NULL,
-			jid TEXT NOT NULL,
-			name TEXT,
-			subscription TEXT,
-			groups TEXT,
-			PRIMARY KEY (account, jid)
-		)`,
-
-		// OMEMO identities
-		`CREATE TABLE IF NOT EXISTS omemo_identities (
-			account TEXT NOT NULL,
-			jid TEXT NOT NULL,
-			device_id INTEGER NOT NULL,
-			identity_key BLOB NOT NULL,
-			trust_level INTEGER DEFAULT 0,
-			first_seen INTEGER NOT NULL,
-			last_seen INTEGER NOT NULL,
-			PRIMARY KEY (account, jid, device_id)
-		)`,
-
-		// OMEMO sessions
-		`CREATE TABLE IF NOT EXISTS omemo_sessions (
-			account TEXT NOT NULL,
-			jid TEXT NOT NULL,
-			device_id INTEGER NOT NULL,
-			session_data BLOB NOT NULL,
-			PRIMARY KEY (account, jid, device_id)
-		)`,
-
-		// OMEMO prekeys
-		`CREATE TABLE IF NOT EXISTS omemo_prekeys (
-			account TEXT NOT NULL,
-			key_id INTEGER NOT NULL,
-			key_data BLOB NOT NULL,
-			PRIMARY KEY (account, key_id)
-		)`,
-
-		// OMEMO signed prekeys
-		`CREATE TABLE IF NOT EXISTS omemo_signed_prekeys (
-			account TEXT NOT NULL,
-			key_id INTEGER NOT NULL,
-			key_data BLOB NOT NULL,
-			signature BLOB NOT NULL,
-			timestamp INTEGER NOT NULL,
-			PRIMARY KEY (account, key_id)
-		)`,
-
-		// MUC bookmarks
-		`CREATE TABLE IF NOT EXISTS bookmarks (
-			account TEXT NOT NULL,
-			jid TEXT NOT NULL,
-			name TEXT,
-			nick TEXT,
-			password TEXT,
-			autojoin INTEGER DEFAULT 0,
-			PRIMARY KEY (account, jid)
-		)`,
-
-		// Session state (persists login sessions)
 		`CREATE TABLE IF NOT EXISTS sessions (
 			account TEXT PRIMARY KEY,
 			resource TEXT,
@@ -129,7 +63,6 @@ func (d *DB) migrate() error {
 			session_data BLOB
 		)`,
 
-		// Window state (persists open windows/chats)
 		`CREATE TABLE IF NOT EXISTS window_state (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account TEXT NOT NULL,
@@ -139,13 +72,11 @@ func (d *DB) migrate() error {
 			active INTEGER DEFAULT 0
 		)`,
 
-		// Application state (UI preferences)
 		`CREATE TABLE IF NOT EXISTS app_state (
 			key TEXT PRIMARY KEY,
 			value TEXT
 		)`,
 
-		// Chat state (unread counts, etc.)
 		`CREATE TABLE IF NOT EXISTS chat_state (
 			account TEXT NOT NULL,
 			jid TEXT NOT NULL,
@@ -154,7 +85,6 @@ func (d *DB) migrate() error {
 			PRIMARY KEY (account, jid)
 		)`,
 
-		// Per-contact presence settings (your custom presence shown to specific contacts)
 		`CREATE TABLE IF NOT EXISTS contact_presence_settings (
 			account TEXT NOT NULL,
 			contact_jid TEXT NOT NULL,
@@ -163,7 +93,6 @@ func (d *DB) migrate() error {
 			PRIMARY KEY (account, contact_jid)
 		)`,
 
-		// Contact's last known presence (for showing "last seen" when offline)
 		`CREATE TABLE IF NOT EXISTS contact_last_presence (
 			account TEXT NOT NULL,
 			contact_jid TEXT NOT NULL,
@@ -173,13 +102,56 @@ func (d *DB) migrate() error {
 			PRIMARY KEY (account, contact_jid)
 		)`,
 
-		// Status sharing settings (who can see your status)
-		// By default, status is NOT shared - user explicitly enables per-contact
 		`CREATE TABLE IF NOT EXISTS status_sharing (
 			account TEXT NOT NULL,
 			contact_jid TEXT NOT NULL,
 			share_enabled INTEGER DEFAULT 0,
 			PRIMARY KEY (account, contact_jid)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS omemo_identity (
+			jid TEXT NOT NULL,
+			device_id INTEGER NOT NULL,
+			private_key BLOB NOT NULL,
+			public_key BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (jid, device_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS omemo_remote_identities (
+			account_jid TEXT NOT NULL,
+			jid TEXT NOT NULL,
+			device_id INTEGER NOT NULL,
+			identity_key BLOB NOT NULL,
+			trust_level INTEGER DEFAULT 1,
+			first_seen INTEGER NOT NULL,
+			PRIMARY KEY (account_jid, jid, device_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS omemo_prekeys (
+			jid TEXT NOT NULL,
+			key_id INTEGER NOT NULL,
+			private_key BLOB NOT NULL,
+			public_key BLOB NOT NULL,
+			PRIMARY KEY (jid, key_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS omemo_signed_prekeys (
+			jid TEXT NOT NULL,
+			key_id INTEGER NOT NULL,
+			private_key BLOB NOT NULL,
+			public_key BLOB NOT NULL,
+			signature BLOB NOT NULL,
+			timestamp INTEGER NOT NULL,
+			PRIMARY KEY (jid, key_id)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS omemo_sessions (
+			account_jid TEXT NOT NULL,
+			jid TEXT NOT NULL,
+			device_id INTEGER NOT NULL,
+			session_data BLOB NOT NULL,
+			PRIMARY KEY (account_jid, jid, device_id)
 		)`,
 	}
 
@@ -192,9 +164,6 @@ func (d *DB) migrate() error {
 	return nil
 }
 
-// Message operations
-
-// SaveMessage saves a message to the database
 func (d *DB) SaveMessage(account, jid, id, body, msgType string, timestamp time.Time, outgoing, encrypted bool) error {
 	_, err := d.db.Exec(`
 		INSERT OR REPLACE INTO messages (id, account, jid, body, timestamp, outgoing, encrypted, type)
@@ -203,7 +172,6 @@ func (d *DB) SaveMessage(account, jid, id, body, msgType string, timestamp time.
 	return err
 }
 
-// GetMessages retrieves messages for a JID
 func (d *DB) GetMessages(account, jid string, limit, offset int) ([]Message, error) {
 	rows, err := d.db.Query(`
 		SELECT id, body, timestamp, outgoing, encrypted, type, received, displayed, corrected, corrected_id
@@ -236,7 +204,6 @@ func (d *DB) GetMessages(account, jid string, limit, offset int) ([]Message, err
 		messages = append(messages, msg)
 	}
 
-	// Reverse to get chronological order
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
 	}
@@ -244,25 +211,21 @@ func (d *DB) GetMessages(account, jid string, limit, offset int) ([]Message, err
 	return messages, nil
 }
 
-// MarkMessageReceived marks a message as received
 func (d *DB) MarkMessageReceived(id string) error {
 	_, err := d.db.Exec("UPDATE messages SET received = 1 WHERE id = ?", id)
 	return err
 }
 
-// MarkMessageDisplayed marks a message as displayed
 func (d *DB) MarkMessageDisplayed(id string) error {
 	_, err := d.db.Exec("UPDATE messages SET displayed = 1 WHERE id = ?", id)
 	return err
 }
 
-// DeleteMessages deletes messages for a JID
 func (d *DB) DeleteMessages(account, jid string) error {
 	_, err := d.db.Exec("DELETE FROM messages WHERE account = ? AND jid = ?", account, jid)
 	return err
 }
 
-// Message represents a stored message
 type Message struct {
 	ID          string
 	Body        string
@@ -276,257 +239,6 @@ type Message struct {
 	CorrectedID string
 }
 
-// Roster operations
-
-// SaveRosterItem saves a roster item
-func (d *DB) SaveRosterItem(account, jid, name, subscription, groups string) error {
-	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO roster (account, jid, name, subscription, groups)
-		VALUES (?, ?, ?, ?, ?)
-	`, account, jid, name, subscription, groups)
-	return err
-}
-
-// GetRoster retrieves the roster for an account
-func (d *DB) GetRoster(account string) ([]RosterItem, error) {
-	rows, err := d.db.Query(`
-		SELECT jid, name, subscription, groups
-		FROM roster
-		WHERE account = ?
-	`, account)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []RosterItem
-	for rows.Next() {
-		var item RosterItem
-		var name, groups sql.NullString
-
-		err := rows.Scan(&item.JID, &name, &item.Subscription, &groups)
-		if err != nil {
-			return nil, err
-		}
-
-		if name.Valid {
-			item.Name = name.String
-		}
-		if groups.Valid {
-			item.Groups = groups.String
-		}
-		items = append(items, item)
-	}
-
-	return items, nil
-}
-
-// DeleteRosterItem deletes a roster item
-func (d *DB) DeleteRosterItem(account, jid string) error {
-	_, err := d.db.Exec("DELETE FROM roster WHERE account = ? AND jid = ?", account, jid)
-	return err
-}
-
-// ClearRoster clears the roster for an account
-func (d *DB) ClearRoster(account string) error {
-	_, err := d.db.Exec("DELETE FROM roster WHERE account = ?", account)
-	return err
-}
-
-// RosterItem represents a stored roster item
-type RosterItem struct {
-	JID          string
-	Name         string
-	Subscription string
-	Groups       string
-}
-
-// OMEMO operations
-
-// SaveOMEMOIdentity saves an OMEMO identity
-func (d *DB) SaveOMEMOIdentity(account, jid string, deviceID int, identityKey []byte, trustLevel int) error {
-	now := time.Now().Unix()
-	_, err := d.db.Exec(`
-		INSERT INTO omemo_identities (account, jid, device_id, identity_key, trust_level, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(account, jid, device_id) DO UPDATE SET
-			identity_key = excluded.identity_key,
-			trust_level = excluded.trust_level,
-			last_seen = excluded.last_seen
-	`, account, jid, deviceID, identityKey, trustLevel, now, now)
-	return err
-}
-
-// GetOMEMOIdentity retrieves an OMEMO identity
-func (d *DB) GetOMEMOIdentity(account, jid string, deviceID int) (*OMEMOIdentity, error) {
-	var identity OMEMOIdentity
-	var firstSeen, lastSeen int64
-
-	err := d.db.QueryRow(`
-		SELECT identity_key, trust_level, first_seen, last_seen
-		FROM omemo_identities
-		WHERE account = ? AND jid = ? AND device_id = ?
-	`, account, jid, deviceID).Scan(&identity.IdentityKey, &identity.TrustLevel, &firstSeen, &lastSeen)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	identity.DeviceID = deviceID
-	identity.FirstSeen = time.Unix(firstSeen, 0)
-	identity.LastSeen = time.Unix(lastSeen, 0)
-	return &identity, nil
-}
-
-// GetOMEMOIdentities retrieves all OMEMO identities for a JID
-func (d *DB) GetOMEMOIdentities(account, jid string) ([]OMEMOIdentity, error) {
-	rows, err := d.db.Query(`
-		SELECT device_id, identity_key, trust_level, first_seen, last_seen
-		FROM omemo_identities
-		WHERE account = ? AND jid = ?
-	`, account, jid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var identities []OMEMOIdentity
-	for rows.Next() {
-		var identity OMEMOIdentity
-		var firstSeen, lastSeen int64
-
-		err := rows.Scan(&identity.DeviceID, &identity.IdentityKey, &identity.TrustLevel, &firstSeen, &lastSeen)
-		if err != nil {
-			return nil, err
-		}
-
-		identity.FirstSeen = time.Unix(firstSeen, 0)
-		identity.LastSeen = time.Unix(lastSeen, 0)
-		identities = append(identities, identity)
-	}
-
-	return identities, nil
-}
-
-// SetOMEMOTrustLevel sets the trust level for an identity
-func (d *DB) SetOMEMOTrustLevel(account, jid string, deviceID, trustLevel int) error {
-	_, err := d.db.Exec(`
-		UPDATE omemo_identities SET trust_level = ?
-		WHERE account = ? AND jid = ? AND device_id = ?
-	`, trustLevel, account, jid, deviceID)
-	return err
-}
-
-// OMEMOIdentity represents a stored OMEMO identity
-type OMEMOIdentity struct {
-	DeviceID    int
-	IdentityKey []byte
-	TrustLevel  int
-	FirstSeen   time.Time
-	LastSeen    time.Time
-}
-
-// SaveOMEMOSession saves an OMEMO session
-func (d *DB) SaveOMEMOSession(account, jid string, deviceID int, sessionData []byte) error {
-	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO omemo_sessions (account, jid, device_id, session_data)
-		VALUES (?, ?, ?, ?)
-	`, account, jid, deviceID, sessionData)
-	return err
-}
-
-// GetOMEMOSession retrieves an OMEMO session
-func (d *DB) GetOMEMOSession(account, jid string, deviceID int) ([]byte, error) {
-	var data []byte
-	err := d.db.QueryRow(`
-		SELECT session_data FROM omemo_sessions
-		WHERE account = ? AND jid = ? AND device_id = ?
-	`, account, jid, deviceID).Scan(&data)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	return data, err
-}
-
-// DeleteOMEMOSession deletes an OMEMO session
-func (d *DB) DeleteOMEMOSession(account, jid string, deviceID int) error {
-	_, err := d.db.Exec(`
-		DELETE FROM omemo_sessions
-		WHERE account = ? AND jid = ? AND device_id = ?
-	`, account, jid, deviceID)
-	return err
-}
-
-// Bookmark operations
-
-// SaveBookmark saves a bookmark
-func (d *DB) SaveBookmark(account, jid, name, nick, password string, autojoin bool) error {
-	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO bookmarks (account, jid, name, nick, password, autojoin)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, account, jid, name, nick, password, autojoin)
-	return err
-}
-
-// GetBookmarks retrieves all bookmarks for an account
-func (d *DB) GetBookmarks(account string) ([]Bookmark, error) {
-	rows, err := d.db.Query(`
-		SELECT jid, name, nick, password, autojoin
-		FROM bookmarks
-		WHERE account = ?
-	`, account)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var bookmarks []Bookmark
-	for rows.Next() {
-		var b Bookmark
-		var name, nick, password sql.NullString
-
-		err := rows.Scan(&b.JID, &name, &nick, &password, &b.Autojoin)
-		if err != nil {
-			return nil, err
-		}
-
-		if name.Valid {
-			b.Name = name.String
-		}
-		if nick.Valid {
-			b.Nick = nick.String
-		}
-		if password.Valid {
-			b.Password = password.String
-		}
-		bookmarks = append(bookmarks, b)
-	}
-
-	return bookmarks, nil
-}
-
-// DeleteBookmark deletes a bookmark
-func (d *DB) DeleteBookmark(account, jid string) error {
-	_, err := d.db.Exec("DELETE FROM bookmarks WHERE account = ? AND jid = ?", account, jid)
-	return err
-}
-
-// Bookmark represents a stored bookmark
-type Bookmark struct {
-	JID      string
-	Name     string
-	Nick     string
-	Password string
-	Autojoin bool
-}
-
-// Chat state operations
-
-// SetUnreadCount sets the unread count for a JID
 func (d *DB) SetUnreadCount(account, jid string, count int) error {
 	_, err := d.db.Exec(`
 		INSERT INTO chat_state (account, jid, unread)
@@ -536,7 +248,6 @@ func (d *DB) SetUnreadCount(account, jid string, count int) error {
 	return err
 }
 
-// GetUnreadCount gets the unread count for a JID
 func (d *DB) GetUnreadCount(account, jid string) (int, error) {
 	var count int
 	err := d.db.QueryRow(`
@@ -550,7 +261,6 @@ func (d *DB) GetUnreadCount(account, jid string) (int, error) {
 	return count, err
 }
 
-// MarkRead marks a chat as read
 func (d *DB) MarkRead(account, jid string) error {
 	now := time.Now().Unix()
 	_, err := d.db.Exec(`
@@ -561,9 +271,6 @@ func (d *DB) MarkRead(account, jid string) error {
 	return err
 }
 
-// Session operations (for persisting login state)
-
-// Session represents a saved login session
 type Session struct {
 	Account       string
 	Resource      string
@@ -574,7 +281,6 @@ type Session struct {
 	SessionData   []byte
 }
 
-// SaveSession saves a login session
 func (d *DB) SaveSession(session Session) error {
 	_, err := d.db.Exec(`
 		INSERT OR REPLACE INTO sessions (account, resource, last_connected, status, status_msg, priority, session_data)
@@ -583,7 +289,6 @@ func (d *DB) SaveSession(session Session) error {
 	return err
 }
 
-// GetSession retrieves a saved session
 func (d *DB) GetSession(account string) (*Session, error) {
 	var session Session
 	var lastConnected int64
@@ -618,7 +323,6 @@ func (d *DB) GetSession(account string) (*Session, error) {
 	return &session, nil
 }
 
-// GetAllSessions retrieves all saved sessions
 func (d *DB) GetAllSessions() ([]Session, error) {
 	rows, err := d.db.Query(`
 		SELECT account, resource, last_connected, status, status_msg, priority, session_data
@@ -660,15 +364,11 @@ func (d *DB) GetAllSessions() ([]Session, error) {
 	return sessions, nil
 }
 
-// DeleteSession deletes a saved session
 func (d *DB) DeleteSession(account string) error {
 	_, err := d.db.Exec("DELETE FROM sessions WHERE account = ?", account)
 	return err
 }
 
-// Window state operations
-
-// WindowState represents the state of a window
 type WindowState struct {
 	ID         int
 	WindowType string
@@ -677,15 +377,12 @@ type WindowState struct {
 	Active     bool
 }
 
-// SaveWindowState saves the current window state
 func (d *DB) SaveWindowState(account string, windows []WindowState) error {
-	// Clear existing state for this account
 	_, err := d.db.Exec("DELETE FROM window_state WHERE account = ?", account)
 	if err != nil {
 		return err
 	}
 
-	// Insert new state
 	for _, w := range windows {
 		_, err := d.db.Exec(`
 			INSERT INTO window_state (account, window_type, jid, position, active)
@@ -699,7 +396,6 @@ func (d *DB) SaveWindowState(account string, windows []WindowState) error {
 	return nil
 }
 
-// GetWindowState retrieves the window state for an account
 func (d *DB) GetWindowState(account string) ([]WindowState, error) {
 	rows, err := d.db.Query(`
 		SELECT id, window_type, jid, position, active
@@ -731,9 +427,6 @@ func (d *DB) GetWindowState(account string) ([]WindowState, error) {
 	return windows, nil
 }
 
-// App state operations (key-value store for UI state)
-
-// SetAppState sets an app state value
 func (d *DB) SetAppState(key, value string) error {
 	_, err := d.db.Exec(`
 		INSERT OR REPLACE INTO app_state (key, value)
@@ -742,7 +435,6 @@ func (d *DB) SetAppState(key, value string) error {
 	return err
 }
 
-// GetAppState gets an app state value
 func (d *DB) GetAppState(key string) (string, error) {
 	var value string
 	err := d.db.QueryRow("SELECT value FROM app_state WHERE key = ?", key).Scan(&value)
@@ -752,15 +444,11 @@ func (d *DB) GetAppState(key string) (string, error) {
 	return value, err
 }
 
-// DeleteAppState deletes an app state value
 func (d *DB) DeleteAppState(key string) error {
 	_, err := d.db.Exec("DELETE FROM app_state WHERE key = ?", key)
 	return err
 }
 
-// Message retention operations
-
-// DeleteOldMessages deletes messages older than the specified number of days
 func (d *DB) DeleteOldMessages(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Unix()
 	result, err := d.db.Exec("DELETE FROM messages WHERE timestamp < ?", cutoff)
@@ -770,14 +458,12 @@ func (d *DB) DeleteOldMessages(days int) (int64, error) {
 	return result.RowsAffected()
 }
 
-// GetMessageCount returns the total number of messages
 func (d *DB) GetMessageCount() (int64, error) {
 	var count int64
 	err := d.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&count)
 	return count, err
 }
 
-// GetDatabaseSize returns the approximate size of the database
 func (d *DB) GetDatabaseSize() (int64, error) {
 	var pageCount, pageSize int64
 	err := d.db.QueryRow("PRAGMA page_count").Scan(&pageCount)
@@ -791,15 +477,11 @@ func (d *DB) GetDatabaseSize() (int64, error) {
 	return pageCount * pageSize, nil
 }
 
-// Vacuum compacts the database
 func (d *DB) Vacuum() error {
 	_, err := d.db.Exec("VACUUM")
 	return err
 }
 
-// Per-contact presence operations
-
-// SaveMyPresenceForContact saves your custom presence for a specific contact
 func (d *DB) SaveMyPresenceForContact(account, contactJID, show, statusMsg string) error {
 	_, err := d.db.Exec(`
 		INSERT OR REPLACE INTO contact_presence_settings (account, contact_jid, my_show, my_status_msg)
@@ -808,7 +490,6 @@ func (d *DB) SaveMyPresenceForContact(account, contactJID, show, statusMsg strin
 	return err
 }
 
-// GetMyPresenceForContact retrieves your custom presence for a specific contact
 func (d *DB) GetMyPresenceForContact(account, contactJID string) (show, statusMsg string, err error) {
 	var showNull, statusNull sql.NullString
 	err = d.db.QueryRow(`
@@ -817,7 +498,7 @@ func (d *DB) GetMyPresenceForContact(account, contactJID string) (show, statusMs
 	`, account, contactJID).Scan(&showNull, &statusNull)
 
 	if err == sql.ErrNoRows {
-		return "", "", nil // No custom presence set
+		return "", "", nil
 	}
 	if err != nil {
 		return "", "", err
@@ -832,7 +513,6 @@ func (d *DB) GetMyPresenceForContact(account, contactJID string) (show, statusMs
 	return show, statusMsg, nil
 }
 
-// DeleteMyPresenceForContact removes your custom presence for a specific contact
 func (d *DB) DeleteMyPresenceForContact(account, contactJID string) error {
 	_, err := d.db.Exec(`
 		DELETE FROM contact_presence_settings
@@ -841,7 +521,6 @@ func (d *DB) DeleteMyPresenceForContact(account, contactJID string) error {
 	return err
 }
 
-// SaveContactLastPresence saves the contact's last known presence
 func (d *DB) SaveContactLastPresence(account, contactJID, show, statusMsg string) error {
 	_, err := d.db.Exec(`
 		INSERT OR REPLACE INTO contact_last_presence (account, contact_jid, their_show, their_status_msg, last_updated)
@@ -850,7 +529,6 @@ func (d *DB) SaveContactLastPresence(account, contactJID, show, statusMsg string
 	return err
 }
 
-// GetContactLastPresence retrieves the contact's last known presence
 func (d *DB) GetContactLastPresence(account, contactJID string) (show, statusMsg string, lastUpdated time.Time, err error) {
 	var showNull, statusNull sql.NullString
 	var lastUpdatedUnix int64
@@ -861,7 +539,7 @@ func (d *DB) GetContactLastPresence(account, contactJID string) (show, statusMsg
 	`, account, contactJID).Scan(&showNull, &statusNull, &lastUpdatedUnix)
 
 	if err == sql.ErrNoRows {
-		return "", "", time.Time{}, nil // No presence recorded
+		return "", "", time.Time{}, nil
 	}
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -877,9 +555,6 @@ func (d *DB) GetContactLastPresence(account, contactJID string) (show, statusMsg
 	return show, statusMsg, lastUpdated, nil
 }
 
-// Status sharing operations
-
-// SetStatusSharing enables or disables status sharing for a contact
 func (d *DB) SetStatusSharing(account, contactJID string, enabled bool) error {
 	val := 0
 	if enabled {
@@ -892,7 +567,6 @@ func (d *DB) SetStatusSharing(account, contactJID string, enabled bool) error {
 	return err
 }
 
-// GetStatusSharing returns whether status sharing is enabled for a contact
 func (d *DB) GetStatusSharing(account, contactJID string) (bool, error) {
 	var enabled int
 	err := d.db.QueryRow(`
@@ -901,7 +575,7 @@ func (d *DB) GetStatusSharing(account, contactJID string) (bool, error) {
 	`, account, contactJID).Scan(&enabled)
 
 	if err == sql.ErrNoRows {
-		return false, nil // Default: not shared
+		return false, nil
 	}
 	if err != nil {
 		return false, err
@@ -910,7 +584,6 @@ func (d *DB) GetStatusSharing(account, contactJID string) (bool, error) {
 	return enabled == 1, nil
 }
 
-// GetContactsWithStatusSharing returns all contacts who have status sharing enabled
 func (d *DB) GetContactsWithStatusSharing(account string) ([]string, error) {
 	rows, err := d.db.Query(`
 		SELECT contact_jid FROM status_sharing
@@ -930,4 +603,58 @@ func (d *DB) GetContactsWithStatusSharing(account string) ([]string, error) {
 		contacts = append(contacts, jid)
 	}
 	return contacts, nil
+}
+
+func (d *DB) SaveMessageWithStanzaID(account, jid, id, stanzaID, body, msgType string, timestamp time.Time, outgoing, encrypted bool) error {
+	_, err := d.db.Exec(`
+		INSERT OR IGNORE INTO messages (id, stanza_id, account, jid, body, timestamp, outgoing, encrypted, type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, stanzaID, account, jid, body, timestamp.Unix(), outgoing, encrypted, msgType)
+	return err
+}
+
+type MAMSync struct {
+	Account       string
+	JID           string
+	LastStanzaID  string
+	LastTimestamp int64
+	LastSynced    int64
+}
+
+func (d *DB) GetMAMSync(account, jid string) (*MAMSync, error) {
+	var sync MAMSync
+	err := d.db.QueryRow(`
+		SELECT account, jid, last_stanza_id, last_timestamp, last_synced
+		FROM mam_sync
+		WHERE account = ? AND jid = ?
+	`, account, jid).Scan(&sync.Account, &sync.JID, &sync.LastStanzaID, &sync.LastTimestamp, &sync.LastSynced)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &sync, err
+}
+
+func (d *DB) SaveMAMSync(sync MAMSync) error {
+	_, err := d.db.Exec(`
+		INSERT OR REPLACE INTO mam_sync (account, jid, last_stanza_id, last_timestamp, last_synced)
+		VALUES (?, ?, ?, ?, ?)
+	`, sync.Account, sync.JID, sync.LastStanzaID, sync.LastTimestamp, time.Now().Unix())
+	return err
+}
+
+func (d *DB) DeleteMAMSync(account, jid string) error {
+	_, err := d.db.Exec(`
+		DELETE FROM mam_sync
+		WHERE account = ? AND jid = ?
+	`, account, jid)
+	return err
+}
+
+func (d *DB) MessageExists(stanzaID string) (bool, error) {
+	var exists bool
+	err := d.db.QueryRow("SELECT 1 FROM messages WHERE stanza_id = ?", stanzaID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return exists, err
 }
