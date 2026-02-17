@@ -19,6 +19,7 @@ import (
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
 	"github.com/meszmate/roster/internal/xmpp/register"
+	"github.com/meszmate/xmpp-go/jid"
 )
 
 // EventType represents the type of event
@@ -1780,11 +1781,28 @@ func (a *App) AddContact(contactJID, name, group string) error {
 		return fmt.Errorf("not connected")
 	}
 
-	// Build groups slice
-	var groups []string
-	if group != "" {
-		groups = []string{group}
+	contactJID = strings.TrimSpace(contactJID)
+	name = strings.TrimSpace(name)
+	group = strings.TrimSpace(group)
+
+	if contactJID == "" {
+		return fmt.Errorf("contact JID is required")
 	}
+
+	parsedJID, err := jid.Parse(contactJID)
+	if err != nil {
+		return fmt.Errorf("invalid contact JID: %w", err)
+	}
+	contactJID = parsedJID.Bare().String()
+
+	if contactJID == "" {
+		return fmt.Errorf("invalid contact JID")
+	}
+	if client.JID().Bare().String() == contactJID {
+		return fmt.Errorf("cannot add your own JID to roster")
+	}
+
+	groups := parseGroupInput(group)
 
 	// Add to roster
 	if err := client.AddContact(contactJID, name, groups); err != nil {
@@ -1804,9 +1822,19 @@ func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
 	// Register the operation
 	a.RegisterOperation(dialogs.OpAddContact, func() {})
 
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
 		// Mark operation as complete when done (before returning)
 		defer a.CompleteOperation(dialogs.OpAddContact)
+		defer func() {
+			if r := recover(); r != nil {
+				result = AddContactResultMsg{
+					Success: false,
+					JID:     contactJID,
+					Name:    name,
+					Error:   fmt.Sprintf("internal error while adding contact: %v", r),
+				}
+			}
+		}()
 
 		err := a.AddContact(contactJID, name, group)
 		if err != nil {
@@ -1831,6 +1859,12 @@ func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
 
 // addContactToLocalRoster adds a contact to local roster immediately (optimistic update)
 func (a *App) addContactToLocalRoster(contactJID, name, group string) {
+	contactJID = strings.TrimSpace(contactJID)
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+	name = strings.TrimSpace(name)
+
 	a.mu.Lock()
 
 	// Check if already exists
@@ -1841,10 +1875,7 @@ func (a *App) addContactToLocalRoster(contactJID, name, group string) {
 		}
 	}
 
-	var groups []string
-	if group != "" {
-		groups = []string{group}
-	}
+	groups := parseGroupInput(group)
 
 	currentAccount := a.currentAccount
 
@@ -1864,6 +1895,39 @@ func (a *App) addContactToLocalRoster(contactJID, name, group string) {
 	a.mu.Unlock()
 
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+}
+
+func parseGroupInput(group string) []string {
+	if group == "" {
+		return nil
+	}
+
+	fields := strings.FieldsFunc(group, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+
+	groups := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		g := strings.TrimSpace(field)
+		if g == "" {
+			continue
+		}
+		key := strings.ToLower(g)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		groups = append(groups, g)
+	}
+
+	if len(groups) == 0 {
+		return nil
+	}
+	return groups
 }
 
 // RequestRosterRefresh requests a fresh roster from the XMPP server

@@ -69,6 +69,78 @@ type Client struct {
 	cancel context.CancelFunc
 }
 
+func (c *Client) getRosterPlugin() (*roster.Plugin, error) {
+	if c.plugins == nil {
+		return nil, fmt.Errorf("plugin manager not initialized")
+	}
+
+	p, ok := c.plugins.Get(roster.Name)
+	if !ok || p == nil {
+		return nil, fmt.Errorf("roster plugin not available")
+	}
+
+	rp, ok := p.(*roster.Plugin)
+	if !ok || rp == nil {
+		return nil, fmt.Errorf("roster plugin has unexpected type %T", p)
+	}
+
+	return rp, nil
+}
+
+func (c *Client) getOMEMOPlugin() (*omemoplugin.Plugin, error) {
+	if c.plugins == nil {
+		return nil, fmt.Errorf("plugin manager not initialized")
+	}
+
+	p, ok := c.plugins.Get(omemoplugin.Name)
+	if !ok || p == nil {
+		return nil, fmt.Errorf("omemo plugin not available")
+	}
+
+	op, ok := p.(*omemoplugin.Plugin)
+	if !ok || op == nil {
+		return nil, fmt.Errorf("omemo plugin has unexpected type %T", p)
+	}
+
+	return op, nil
+}
+
+func (c *Client) getMUCPlugin() (*muc.Plugin, error) {
+	if c.plugins == nil {
+		return nil, fmt.Errorf("plugin manager not initialized")
+	}
+
+	p, ok := c.plugins.Get(muc.Name)
+	if !ok || p == nil {
+		return nil, fmt.Errorf("muc plugin not available")
+	}
+
+	mp, ok := p.(*muc.Plugin)
+	if !ok || mp == nil {
+		return nil, fmt.Errorf("muc plugin has unexpected type %T", p)
+	}
+
+	return mp, nil
+}
+
+func (c *Client) getBookmarksPlugin() (*bookmarks.Plugin, error) {
+	if c.plugins == nil {
+		return nil, fmt.Errorf("plugin manager not initialized")
+	}
+
+	p, ok := c.plugins.Get(bookmarks.Name)
+	if !ok || p == nil {
+		return nil, fmt.Errorf("bookmarks plugin not available")
+	}
+
+	bp, ok := p.(*bookmarks.Plugin)
+	if !ok || bp == nil {
+		return nil, fmt.Errorf("bookmarks plugin has unexpected type %T", p)
+	}
+
+	return bp, nil
+}
+
 type Message struct {
 	ID          string
 	From        jid.JID
@@ -434,12 +506,11 @@ func (c *Client) SendEncryptedMessage(to, body string) (string, error) {
 		return "", fmt.Errorf("invalid JID: %w", err)
 	}
 
-	rosterPlugin, ok := c.plugins.Get(roster.Name)
-	if !ok {
+	rp, err := c.getRosterPlugin()
+	if err != nil {
 		return c.SendMessage(to, body)
 	}
 
-	rp := rosterPlugin.(*roster.Plugin)
 	items, err := rp.Items(c.ctx)
 	if err != nil {
 		return c.SendMessage(to, body)
@@ -448,9 +519,8 @@ func (c *Client) SendEncryptedMessage(to, body string) (string, error) {
 	var devices []cryptoomemo.Address
 	for _, item := range items {
 		if item.JID == toJID.Bare().String() {
-			omemoPlugin, ok := c.plugins.Get(omemoplugin.Name)
-			if ok {
-				op := omemoPlugin.(*omemoplugin.Plugin)
+			op, err := c.getOMEMOPlugin()
+			if err == nil {
 				devs := op.GetDevices(item.JID)
 				for _, d := range devs {
 					devices = append(devices, cryptoomemo.Address{
@@ -570,12 +640,12 @@ func (c *Client) RequestRoster() error {
 	}
 	c.mu.RUnlock()
 
-	rp, ok := c.plugins.Get(roster.Name)
-	if !ok {
-		return fmt.Errorf("roster plugin not available")
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return err
 	}
 
-	items, err := rp.(*roster.Plugin).Items(c.ctx)
+	items, err := rp.Items(c.ctx)
 	if err != nil {
 		return err
 	}
@@ -605,12 +675,12 @@ func (c *Client) AddContact(contactJID, name string, groups []string) error {
 	}
 	c.mu.RUnlock()
 
-	rp, ok := c.plugins.Get(roster.Name)
-	if !ok {
-		return fmt.Errorf("roster plugin not available")
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return err
 	}
 
-	return rp.(*roster.Plugin).Set(c.ctx, roster.Item{
+	return rp.Set(c.ctx, roster.Item{
 		JID:    contactJID,
 		Name:   name,
 		Groups: groups,
@@ -625,12 +695,12 @@ func (c *Client) RemoveContact(contactJID string) error {
 	}
 	c.mu.RUnlock()
 
-	rp, ok := c.plugins.Get(roster.Name)
-	if !ok {
-		return fmt.Errorf("roster plugin not available")
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return err
 	}
 
-	return rp.(*roster.Plugin).Remove(c.ctx, contactJID)
+	return rp.Remove(c.ctx, contactJID)
 }
 
 func (c *Client) Subscribe(contactJID string) error {
@@ -681,12 +751,12 @@ func (c *Client) JoinRoom(roomJID, nick, password string) error {
 	}
 	c.mu.RUnlock()
 
-	mp, ok := c.plugins.Get(muc.Name)
-	if !ok {
-		return fmt.Errorf("muc plugin not available")
+	mp, err := c.getMUCPlugin()
+	if err != nil {
+		return err
 	}
 
-	return mp.(*muc.Plugin).JoinRoom(c.ctx, roomJID, nick)
+	return mp.JoinRoom(c.ctx, roomJID, nick)
 }
 
 func (c *Client) LeaveRoom(roomJID string) error {
@@ -697,12 +767,12 @@ func (c *Client) LeaveRoom(roomJID string) error {
 	}
 	c.mu.RUnlock()
 
-	mp, ok := c.plugins.Get(muc.Name)
-	if !ok {
-		return fmt.Errorf("muc plugin not available")
+	mp, err := c.getMUCPlugin()
+	if err != nil {
+		return err
 	}
 
-	return mp.(*muc.Plugin).LeaveRoom(c.ctx, roomJID)
+	return mp.LeaveRoom(c.ctx, roomJID)
 }
 
 func (c *Client) SendReceipt(to, messageID string) error {
@@ -817,12 +887,12 @@ func (c *Client) GetRosterItems() ([]RosterItem, error) {
 	}
 	c.mu.RUnlock()
 
-	rp, ok := c.plugins.Get(roster.Name)
-	if !ok {
-		return nil, fmt.Errorf("roster plugin not available")
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return nil, err
 	}
 
-	items, err := rp.(*roster.Plugin).Items(c.ctx)
+	items, err := rp.Items(c.ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -857,13 +927,13 @@ func (c *Client) GetBookmarks() ([]Bookmark, error) {
 	}
 	c.mu.RUnlock()
 
-	bp, ok := c.plugins.Get(bookmarks.Name)
-	if !ok {
-		return nil, fmt.Errorf("bookmarks plugin not available")
+	bp, err := c.getBookmarksPlugin()
+	if err != nil {
+		return nil, err
 	}
 
 	userJID := c.jid.Bare().String()
-	bms, err := bp.(*bookmarks.Plugin).List(c.ctx, userJID)
+	bms, err := bp.List(c.ctx, userJID)
 	if err != nil {
 		return nil, err
 	}
@@ -889,9 +959,9 @@ func (c *Client) AddBookmark(roomJID, name, nick, password string, autojoin bool
 	}
 	c.mu.RUnlock()
 
-	bp, ok := c.plugins.Get(bookmarks.Name)
-	if !ok {
-		return fmt.Errorf("bookmarks plugin not available")
+	bp, err := c.getBookmarksPlugin()
+	if err != nil {
+		return err
 	}
 
 	userJID := c.jid.Bare().String()
@@ -903,7 +973,7 @@ func (c *Client) AddBookmark(roomJID, name, nick, password string, autojoin bool
 		Password: password,
 		Autojoin: autojoin,
 	}
-	return bp.(*bookmarks.Plugin).Set(c.ctx, bm)
+	return bp.Set(c.ctx, bm)
 }
 
 func (c *Client) DeleteBookmark(roomJID string) error {
@@ -914,13 +984,13 @@ func (c *Client) DeleteBookmark(roomJID string) error {
 	}
 	c.mu.RUnlock()
 
-	bp, ok := c.plugins.Get(bookmarks.Name)
-	if !ok {
-		return fmt.Errorf("bookmarks plugin not available")
+	bp, err := c.getBookmarksPlugin()
+	if err != nil {
+		return err
 	}
 
 	userJID := c.jid.Bare().String()
-	return bp.(*bookmarks.Plugin).Delete(c.ctx, userJID, roomJID)
+	return bp.Delete(c.ctx, userJID, roomJID)
 }
 
 func (c *Client) CorrectMessage(to, originalID, newBody string) (string, error) {
