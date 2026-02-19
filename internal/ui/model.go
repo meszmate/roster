@@ -588,7 +588,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 					m.openChat(jid)
 				}
 			}
-			m.viewMode = ViewModeNormal
+			m.resetDetailViewState()
 			m.focus = FocusChat
 		}
 
@@ -760,9 +760,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				// Open contact chat directly and enter insert mode for immediate typing.
 				if jid := m.roster.SelectedJID(); jid != "" {
 					m.openChat(jid)
-					m.viewMode = ViewModeNormal
-					m.detailContactJID = ""
-					m.detailAccountJID = ""
+					m.resetDetailViewState()
 					m.focus = FocusChat
 					m.keys.SetMode(keybindings.ModeInsert)
 				}
@@ -771,8 +769,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 			// From contact details, Enter opens the chat
 			if m.detailContactJID != "" {
 				m.openChat(m.detailContactJID)
-				m.viewMode = ViewModeNormal
-				m.detailContactJID = ""
+				m.resetDetailViewState()
 				m.focus = FocusChat
 				m.keys.SetMode(keybindings.ModeInsert)
 			}
@@ -1074,8 +1071,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 					m.app.SwitchActiveAccount("")
 					m.windows = m.windows.SetAccountForActive("")
 					m.roster = m.roster.SetContacts(m.app.GetContacts())
-					m.viewMode = ViewModeNormal
-					m.detailAccountJID = ""
+					m.resetDetailViewState()
 					m.chat = m.chat.SetStatusMsg("No account selected")
 					return nil
 				}
@@ -1584,6 +1580,12 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-1] + "…"
+}
+
+func (m *Model) resetDetailViewState() {
+	m.viewMode = ViewModeNormal
+	m.detailAccountJID = ""
+	m.detailContactJID = ""
 }
 
 // updateFocusedComponent sends the key message to the focused component
