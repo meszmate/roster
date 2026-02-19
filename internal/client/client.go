@@ -1,12 +1,17 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +39,7 @@ import (
 	"github.com/meszmate/xmpp-go/stanza"
 	"github.com/meszmate/xmpp-go/storage"
 	"github.com/meszmate/xmpp-go/storage/memory"
+	"github.com/meszmate/xmpp-go/stream"
 	"github.com/meszmate/xmpp-go/transport"
 
 	cryptoomemo "github.com/meszmate/xmpp-go/crypto/omemo"
@@ -67,6 +73,83 @@ type Client struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+const (
+	nsStream = "http://etherx.jabber.org/streams"
+	nsTLS    = "urn:ietf:params:xml:ns:xmpp-tls"
+	nsSASL   = "urn:ietf:params:xml:ns:xmpp-sasl"
+)
+
+type streamFeatures struct {
+	XMLName    xml.Name  `xml:"http://etherx.jabber.org/streams features"`
+	StartTLS   *struct{} `xml:"urn:ietf:params:xml:ns:xmpp-tls starttls"`
+	Mechanisms []string  `xml:"urn:ietf:params:xml:ns:xmpp-sasl mechanisms>mechanism"`
+	Bind       *struct{} `xml:"urn:ietf:params:xml:ns:xmpp-bind bind"`
+}
+
+type startTLSRequest struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-tls starttls"`
+}
+
+type saslAuth struct {
+	XMLName   xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-sasl auth"`
+	Mechanism string   `xml:"mechanism,attr"`
+	Value     string   `xml:",chardata"`
+}
+
+type saslFailure struct {
+	XMLName xml.Name `xml:"urn:ietf:params:xml:ns:xmpp-sasl failure"`
+	Text    string   `xml:"text"`
+}
+
+func sanitizeEmptyJIDAttrs(start *xml.StartElement) {
+	if start == nil || len(start.Attr) == 0 {
+		return
+	}
+
+	filtered := start.Attr[:0]
+	for _, attr := range start.Attr {
+		if (attr.Name.Local == "from" || attr.Name.Local == "to") && strings.TrimSpace(attr.Value) == "" {
+			continue
+		}
+		filtered = append(filtered, attr)
+	}
+	start.Attr = filtered
+}
+
+func parseIQErrorDetails(resp *stanza.IQ) string {
+	if resp == nil {
+		return "unknown iq error"
+	}
+
+	var parts []string
+	if resp.Error != nil && resp.Error.Type != "" {
+		parts = append(parts, "type="+resp.Error.Type)
+	}
+
+	raw := strings.ToLower(string(resp.Query))
+	conditions := []string{
+		"not-authorized",
+		"service-unavailable",
+		"feature-not-implemented",
+		"resource-constraint",
+		"conflict",
+		"bad-request",
+		"not-acceptable",
+		"jid-malformed",
+	}
+	for _, cond := range conditions {
+		if strings.Contains(raw, cond) {
+			parts = append(parts, "condition="+cond)
+			break
+		}
+	}
+
+	if len(parts) == 0 {
+		return "unknown iq error"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (c *Client) getRosterPlugin() (*roster.Plugin, error) {
@@ -187,8 +270,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("invalid JID: %w", err)
 	}
 
-	if cfg.Resource != "" {
-		parsedJID = parsedJID.WithResource(cfg.Resource)
+	resource := strings.TrimSpace(cfg.Resource)
+	// "roster" is our historic default value; prefer server-assigned resources
+	// unless the user explicitly configures another one.
+	if strings.EqualFold(resource, "roster") {
+		resource = ""
+	}
+	if resource != "" {
+		parsedJID = parsedJID.WithResource(resource)
 	}
 
 	if cfg.Port == 0 {
@@ -209,7 +298,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		password:   cfg.Password,
 		server:     cfg.Server,
 		port:       cfg.Port,
-		resource:   cfg.Resource,
+		resource:   resource,
 		deviceID:   deviceID,
 		pendingIQs: make(map[string]chan *stanza.IQ),
 		ctx:        ctx,
@@ -231,16 +320,36 @@ func (c *Client) Connect() error {
 		MinVersion: tls.VersionTLS12,
 	}
 
-	trans, err := dialer.Dial(c.ctx, c.jid.Domain())
-	if err != nil {
-		return fmt.Errorf("failed to dial server: %w", err)
+	var trans *transport.TCP
+	server := strings.TrimSpace(c.server)
+	// Use direct host/port when explicitly configured; otherwise use SRV lookup.
+	if server != "" || c.port != 5222 {
+		host := c.jid.Domain()
+		if server != "" {
+			host = server
+		}
+		port := c.port
+		if port == 0 {
+			port = 5222
+		}
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
+		conn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(c.ctx, "tcp", addr)
+		if err != nil {
+			return fmt.Errorf("failed to dial server %s: %w", addr, err)
+		}
+		trans = transport.NewTCP(conn)
+	} else {
+		var err error
+		trans, err = dialer.Dial(c.ctx, c.jid.Domain())
+		if err != nil {
+			return fmt.Errorf("failed to dial server: %w", err)
+		}
 	}
 
 	c.omemoStore = NewOMEMOStore(c.jid.String(), c.deviceID)
 	c.omemoManager = cryptoomemo.NewManager(c.omemoStore)
 
-	_, err = c.omemoManager.GenerateBundle(100)
-	if err != nil {
+	if _, err := c.omemoManager.GenerateBundle(100); err != nil {
 		trans.Close()
 		return fmt.Errorf("failed to generate OMEMO bundle: %w", err)
 	}
@@ -272,15 +381,6 @@ func (c *Client) Connect() error {
 		}
 	}
 
-	client, err := xmp.NewClient(c.jid, c.password,
-		xmp.WithPlugins(plugins...),
-		xmp.WithHandler(xmp.HandlerFunc(c.handleStanza)),
-	)
-	if err != nil {
-		trans.Close()
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-
 	sessionOpts := []xmp.SessionOption{
 		xmp.WithLocalAddr(c.jid),
 	}
@@ -293,9 +393,14 @@ func (c *Client) Connect() error {
 
 	c.session = session
 
+	if err := c.negotiateClientSession(trans); err != nil {
+		session.Close()
+		return fmt.Errorf("xmpp negotiation failed: %w", err)
+	}
+
 	params := plugin.InitParams{
 		SendRaw: func(ctx context.Context, data []byte) error {
-			return c.session.SendRaw(ctx, nil)
+			return c.session.SendRaw(ctx, bytes.NewReader(data))
 		},
 		SendElement: c.session.SendElement,
 		State:       func() uint32 { return uint32(c.session.State()) },
@@ -310,7 +415,7 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("failed to initialize plugins: %w", err)
 	}
 
-	c.client = client
+	c.client = nil
 	c.connected = true
 
 	go c.serve()
@@ -323,8 +428,372 @@ func (c *Client) Connect() error {
 }
 
 func (c *Client) serve() {
-	if err := c.session.Serve(nil); err != nil {
-		c.handleDisconnect(err)
+	for {
+		tok, err := c.session.Reader().Token()
+		if err != nil {
+			c.handleDisconnect(err)
+			return
+		}
+
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		switch start.Name.Local {
+		case "message":
+			sanitizeEmptyJIDAttrs(&start)
+			var msg stanza.Message
+			if err := c.session.Reader().DecodeElement(&msg, &start); err != nil {
+				c.handleDisconnect(err)
+				return
+			}
+			c.handleMessage(&msg)
+
+		case "presence":
+			sanitizeEmptyJIDAttrs(&start)
+			var p stanza.Presence
+			if err := c.session.Reader().DecodeElement(&p, &start); err != nil {
+				c.handleDisconnect(err)
+				return
+			}
+			c.handlePresence(&p)
+
+		case "iq":
+			sanitizeEmptyJIDAttrs(&start)
+			var iq stanza.IQ
+			if err := c.session.Reader().DecodeElement(&iq, &start); err != nil {
+				c.handleDisconnect(err)
+				return
+			}
+			c.handleIQ(&iq)
+
+		default:
+			// Ignore stream-level elements (stream root/features/proceed/success/etc).
+			if start.Name.Space == nsStream {
+				if start.Name.Local == "stream" {
+					continue
+				}
+				if err := c.session.Reader().Skip(); err != nil {
+					c.handleDisconnect(err)
+					return
+				}
+				continue
+			}
+			if err := c.session.Reader().Skip(); err != nil {
+				c.handleDisconnect(err)
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) negotiateClientSession(trans transport.Transport) error {
+	if err := c.openStream(); err != nil {
+		return err
+	}
+
+	features, err := c.readStreamFeatures()
+	if err != nil {
+		return err
+	}
+
+	if features.StartTLS != nil {
+		if err := c.startTLS(trans); err != nil {
+			return err
+		}
+
+		if err := c.openStream(); err != nil {
+			return err
+		}
+		features, err = c.readStreamFeatures()
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := c.authenticatePlain(features); err != nil {
+		return err
+	}
+
+	if err := c.openStream(); err != nil {
+		return err
+	}
+	features, err = c.readStreamFeatures()
+	if err != nil {
+		return err
+	}
+
+	if features.Bind == nil {
+		return fmt.Errorf("server did not offer resource binding")
+	}
+
+	return c.bindResource()
+}
+
+func (c *Client) openStream() error {
+	to, err := jid.New("", c.jid.Domain(), "")
+	if err != nil {
+		return fmt.Errorf("invalid domain for stream: %w", err)
+	}
+
+	header := stream.Open(stream.Header{
+		To: to,
+		NS: "jabber:client",
+	})
+
+	if _, err := c.session.Writer().WriteRaw(header); err != nil {
+		return fmt.Errorf("failed to send stream header: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) readStreamFeatures() (*streamFeatures, error) {
+	for {
+		tok, err := c.session.Reader().Token()
+		if err != nil {
+			return nil, err
+		}
+
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		if start.Name.Space == nsStream && start.Name.Local == "stream" {
+			continue
+		}
+
+		if start.Name.Space == nsStream && start.Name.Local == "features" {
+			var features streamFeatures
+			if err := c.session.Reader().DecodeElement(&features, &start); err != nil {
+				return nil, err
+			}
+			return &features, nil
+		}
+
+		if err := c.session.Reader().Skip(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (c *Client) startTLS(trans transport.Transport) error {
+	if err := c.session.SendElement(c.ctx, startTLSRequest{}); err != nil {
+		return fmt.Errorf("failed to request STARTTLS: %w", err)
+	}
+
+	for {
+		tok, err := c.session.Reader().Token()
+		if err != nil {
+			return err
+		}
+
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		if start.Name.Space != nsTLS {
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch start.Name.Local {
+		case "proceed":
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+			tlsConfig := &tls.Config{
+				ServerName: c.jid.Domain(),
+				MinVersion: tls.VersionTLS12,
+			}
+			if err := trans.StartTLS(tlsConfig); err != nil {
+				return fmt.Errorf("starttls handshake failed: %w", err)
+			}
+			return nil
+		case "failure":
+			_ = c.session.Reader().Skip()
+			return fmt.Errorf("server rejected STARTTLS")
+		default:
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (c *Client) authenticatePlain(features *streamFeatures) error {
+	hasPlain := false
+	for _, mech := range features.Mechanisms {
+		if mech == "PLAIN" {
+			hasPlain = true
+			break
+		}
+	}
+	if !hasPlain {
+		return fmt.Errorf("server does not offer SASL PLAIN")
+	}
+
+	authcid := c.jid.Local()
+	payload := "\x00" + authcid + "\x00" + c.password
+	value := base64.StdEncoding.EncodeToString([]byte(payload))
+
+	if err := c.session.SendElement(c.ctx, saslAuth{
+		Mechanism: "PLAIN",
+		Value:     value,
+	}); err != nil {
+		return fmt.Errorf("failed to send SASL auth: %w", err)
+	}
+
+	for {
+		tok, err := c.session.Reader().Token()
+		if err != nil {
+			return err
+		}
+
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		if start.Name.Space != nsSASL {
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch start.Name.Local {
+		case "success":
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+			return nil
+		case "failure":
+			var fail saslFailure
+			if err := c.session.Reader().DecodeElement(&fail, &start); err != nil {
+				return err
+			}
+			if fail.Text != "" {
+				return fmt.Errorf("sasl authentication failed: %s", fail.Text)
+			}
+			return fmt.Errorf("sasl authentication failed")
+		default:
+			if err := c.session.Reader().Skip(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (c *Client) bindResource() error {
+	tryBind := func(resource string) error {
+		iq := stanza.NewIQ(stanza.IQSet)
+		queryXML, err := xml.Marshal(xmp.BindRequest{Resource: resource})
+		if err != nil {
+			return err
+		}
+		iq.Query = queryXML
+
+		resp, err := c.sendIQAndWaitDirect(iq, 12*time.Second)
+		if err != nil {
+			return err
+		}
+		if resp.Type != stanza.IQResult {
+			return fmt.Errorf("bind iq failed: %s", parseIQErrorDetails(resp))
+		}
+
+		if len(resp.Query) > 0 {
+			var bindRes xmp.BindResult
+			if err := xml.Unmarshal(resp.Query, &bindRes); err == nil && bindRes.JID != "" {
+				if parsed, err := jid.Parse(bindRes.JID); err == nil {
+					c.jid = parsed
+					c.session.SetLocalAddr(parsed)
+				}
+			}
+		}
+
+		return nil
+	}
+
+	resource := strings.TrimSpace(c.resource)
+
+	// Try server-assigned resource first; some servers reject fixed/default resources.
+	attempts := make([]string, 0, 2)
+	attempts = append(attempts, "")
+	if resource != "" {
+		attempts = append(attempts, resource)
+	}
+
+	var errs []string
+	seen := make(map[string]struct{}, len(attempts))
+	for _, candidate := range attempts {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+
+		if err := tryBind(candidate); err == nil {
+			return nil
+		} else {
+			label := "server-assigned"
+			if candidate != "" {
+				label = fmt.Sprintf("resource %q", candidate)
+			}
+			errs = append(errs, fmt.Sprintf("%s: %v", label, err))
+		}
+	}
+
+	return fmt.Errorf("bind failed (%s)", strings.Join(errs, "; "))
+}
+
+func (c *Client) sendIQAndWaitDirect(iq *stanza.IQ, timeout time.Duration) (*stanza.IQ, error) {
+	if err := c.session.Send(c.ctx, iq); err != nil {
+		return nil, err
+	}
+
+	if connGetter, ok := c.session.Transport().(interface{ Conn() net.Conn }); ok {
+		conn := connGetter.Conn()
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		defer conn.SetReadDeadline(time.Time{})
+	}
+
+	for {
+		tok, err := c.session.Reader().Token()
+		if err != nil {
+			return nil, err
+		}
+
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		switch start.Name.Local {
+		case "iq":
+			sanitizeEmptyJIDAttrs(&start)
+			var resp stanza.IQ
+			if err := c.session.Reader().DecodeElement(&resp, &start); err != nil {
+				return nil, err
+			}
+			if resp.ID == iq.ID {
+				return &resp, nil
+			}
+		case "message", "presence":
+			if err := c.session.Reader().Skip(); err != nil {
+				return nil, err
+			}
+		default:
+			if start.Name.Space == nsStream && start.Name.Local == "stream" {
+				continue
+			}
+			if err := c.session.Reader().Skip(); err != nil {
+				return nil, err
+			}
+		}
 	}
 }
 
@@ -415,6 +884,13 @@ func (c *Client) handlePresence(p *stanza.Presence) {
 }
 
 func (c *Client) handleIQ(iq *stanza.IQ) {
+	// Handle unsolicited roster pushes (RFC 6121) directly.
+	if iq.Type == stanza.IQSet {
+		if handled := c.handleRosterPush(iq); handled {
+			return
+		}
+	}
+
 	c.mu.Lock()
 	if ch, ok := c.pendingIQs[iq.ID]; ok {
 		delete(c.pendingIQs, iq.ID)
@@ -423,6 +899,127 @@ func (c *Client) handleIQ(iq *stanza.IQ) {
 		return
 	}
 	c.mu.Unlock()
+}
+
+func (c *Client) parseRosterQuery(iq *stanza.IQ) (roster.Query, bool) {
+	if len(iq.Query) == 0 {
+		return roster.Query{}, false
+	}
+
+	var query roster.Query
+	if err := xml.Unmarshal(iq.Query, &query); err != nil {
+		return roster.Query{}, false
+	}
+
+	if query.XMLName.Space != "jabber:iq:roster" || query.XMLName.Local != "query" {
+		return roster.Query{}, false
+	}
+
+	return query, true
+}
+
+func (c *Client) applyRosterItems(query roster.Query) error {
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return err
+	}
+
+	for _, item := range query.Items {
+		if item.Subscription == roster.SubRemove {
+			if err := rp.Remove(c.ctx, item.JID); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := rp.Set(c.ctx, item); err != nil {
+			return err
+		}
+	}
+
+	if query.Ver != "" {
+		_ = rp.SetVersion(c.ctx, query.Ver)
+	}
+
+	return nil
+}
+
+func (c *Client) emitRosterFromStore() {
+	if c.onRoster == nil {
+		return
+	}
+
+	rp, err := c.getRosterPlugin()
+	if err != nil {
+		return
+	}
+
+	items, err := rp.Items(c.ctx)
+	if err != nil {
+		return
+	}
+
+	rosterItems := make([]RosterItem, len(items))
+	for i, item := range items {
+		parsedJID, _ := jid.Parse(item.JID)
+		rosterItems[i] = RosterItem{
+			JID:          parsedJID,
+			Name:         item.Name,
+			Subscription: item.Subscription,
+			Groups:       item.Groups,
+		}
+	}
+
+	c.onRoster(rosterItems)
+}
+
+func (c *Client) handleRosterPush(iq *stanza.IQ) bool {
+	query, ok := c.parseRosterQuery(iq)
+	if !ok {
+		return false
+	}
+
+	_ = c.applyRosterItems(query)
+	c.emitRosterFromStore()
+
+	// Ack roster push IQ set.
+	_ = c.session.Send(c.ctx, iq.ResultIQ())
+	return true
+}
+
+func (c *Client) sendIQAndWait(session *xmp.Session, iq *stanza.IQ, timeout time.Duration) (*stanza.IQ, error) {
+	respCh := make(chan *stanza.IQ, 1)
+	c.mu.Lock()
+	c.pendingIQs[iq.ID] = respCh
+	c.mu.Unlock()
+
+	if err := session.Send(c.ctx, iq); err != nil {
+		c.mu.Lock()
+		delete(c.pendingIQs, iq.ID)
+		c.mu.Unlock()
+		return nil, err
+	}
+
+	select {
+	case resp := <-respCh:
+		if resp == nil {
+			return nil, fmt.Errorf("empty iq response")
+		}
+		if resp.Type == stanza.IQError {
+			return nil, fmt.Errorf("iq request failed: %s", parseIQErrorDetails(resp))
+		}
+		return resp, nil
+	case <-time.After(timeout):
+		c.mu.Lock()
+		delete(c.pendingIQs, iq.ID)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("iq request timed out")
+	case <-c.ctx.Done():
+		c.mu.Lock()
+		delete(c.pendingIQs, iq.ID)
+		c.mu.Unlock()
+		return nil, c.ctx.Err()
+	}
 }
 
 func (c *Client) handleDisconnect(err error) {
@@ -638,32 +1235,28 @@ func (c *Client) RequestRoster() error {
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
+	session := c.session
 	c.mu.RUnlock()
 
-	rp, err := c.getRosterPlugin()
+	iq := stanza.NewIQ(stanza.IQGet)
+	queryXML, err := xml.Marshal(roster.Query{})
+	if err != nil {
+		return fmt.Errorf("failed to marshal roster query: %w", err)
+	}
+	iq.Query = queryXML
+
+	resp, err := c.sendIQAndWait(session, iq, 12*time.Second)
 	if err != nil {
 		return err
 	}
-
-	items, err := rp.Items(c.ctx)
-	if err != nil {
+	query, ok := c.parseRosterQuery(resp)
+	if !ok {
+		return fmt.Errorf("invalid roster response payload")
+	}
+	if err := c.applyRosterItems(query); err != nil {
 		return err
 	}
-
-	if c.onRoster != nil {
-		rosterItems := make([]RosterItem, len(items))
-		for i, item := range items {
-			parsedJID, _ := jid.Parse(item.JID)
-			rosterItems[i] = RosterItem{
-				JID:          parsedJID,
-				Name:         item.Name,
-				Subscription: item.Subscription,
-				Groups:       item.Groups,
-			}
-		}
-		c.onRoster(rosterItems)
-	}
-
+	c.emitRosterFromStore()
 	return nil
 }
 
@@ -673,6 +1266,7 @@ func (c *Client) AddContact(contactJID, name string, groups []string) (err error
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
+	session := c.session
 	c.mu.RUnlock()
 
 	defer func() {
@@ -681,16 +1275,26 @@ func (c *Client) AddContact(contactJID, name string, groups []string) (err error
 		}
 	}()
 
-	rp, err := c.getRosterPlugin()
-	if err != nil {
-		return err
-	}
-
-	return rp.Set(c.ctx, roster.Item{
-		JID:    contactJID,
-		Name:   name,
-		Groups: groups,
+	iq := stanza.NewIQ(stanza.IQSet)
+	queryXML, err := xml.Marshal(roster.Query{
+		Items: []roster.Item{
+			{
+				JID:    contactJID,
+				Name:   name,
+				Groups: groups,
+			},
+		},
 	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal roster set request: %w", err)
+	}
+	iq.Query = queryXML
+
+	_, err = c.sendIQAndWait(session, iq, 12*time.Second)
+	if err != nil {
+		return fmt.Errorf("roster set failed: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) RemoveContact(contactJID string) (err error) {
@@ -699,6 +1303,7 @@ func (c *Client) RemoveContact(contactJID string) (err error) {
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
+	session := c.session
 	c.mu.RUnlock()
 
 	defer func() {
@@ -707,12 +1312,25 @@ func (c *Client) RemoveContact(contactJID string) (err error) {
 		}
 	}()
 
-	rp, err := c.getRosterPlugin()
+	iq := stanza.NewIQ(stanza.IQSet)
+	queryXML, err := xml.Marshal(roster.Query{
+		Items: []roster.Item{
+			{
+				JID:          contactJID,
+				Subscription: roster.SubRemove,
+			},
+		},
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal roster remove request: %w", err)
 	}
+	iq.Query = queryXML
 
-	return rp.Remove(c.ctx, contactJID)
+	_, err = c.sendIQAndWait(session, iq, 12*time.Second)
+	if err != nil {
+		return fmt.Errorf("roster remove failed: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) Subscribe(contactJID string) error {

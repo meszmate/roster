@@ -308,6 +308,7 @@ func (m *Manager) setupDefaultBindings() {
 		"gx": ActionRemoveContact, // 'g' prefix + 'x' for remove
 		"gR": ActionRenameContact, // 'g' prefix + 'R' for rename (capital)
 		"gi": ActionShowInfo,      // 'g' prefix + 'i' for info
+		"gd": ActionShowDetails,   // 'g' prefix + 'd' for full details
 
 		// MUC (avoiding ctrl conflicts for tmux)
 		"gj": ActionJoinRoom,         // 'g' prefix + 'j' for join
@@ -339,6 +340,7 @@ func (m *Manager) setupDefaultBindings() {
 		"H": ActionShowContextHelp, // Show context-sensitive help/info popup
 
 		// Account actions (work when focused on accounts section)
+		"c": ActionAccountConnect,    // Connect to selected account (lowercase alias)
 		"C": ActionAccountConnect,    // Connect to selected account
 		"D": ActionAccountDisconnect, // Disconnect selected account
 		"X": ActionAccountRemove,     // Remove selected account (with confirmation)

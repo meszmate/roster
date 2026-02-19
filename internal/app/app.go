@@ -29,6 +29,7 @@ const (
 	EventRosterUpdate EventType = iota
 	EventMessage
 	EventPresence
+	EventRosterLoading
 	EventConnected
 	EventDisconnected
 	EventError
@@ -92,6 +93,12 @@ type PresenceUpdate struct {
 	JID       string
 	Status    string
 	StatusMsg string
+}
+
+// RosterLoadingUpdate represents roster loading state for an account.
+type RosterLoadingUpdate struct {
+	AccountJID string
+	Loading    bool
 }
 
 // CommandAction represents a command that needs UI interaction
@@ -438,14 +445,19 @@ func (a *App) SetStatusAndSend(status, statusMsg string) error {
 
 // GetContacts returns the roster entries (alias for GetRosters for compatibility)
 func (a *App) GetContacts() []roster.Roster {
-	return a.GetRosters()
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	return a.GetContactsForAccount(accountJID)
 }
 
 // GetRosters returns the roster entries
 func (a *App) GetRosters() []roster.Roster {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.rosters
+	out := make([]roster.Roster, len(a.rosters))
+	copy(out, a.rosters)
+	return out
 }
 
 // GetContactsWithStatusInfo returns roster entries enriched with status sharing info
@@ -1408,14 +1420,8 @@ func (a *App) ClearContactUnread(accountJID, contactJID string) {
 // SwitchActiveAccount switches to a different account
 func (a *App) SwitchActiveAccount(jid string) {
 	a.mu.Lock()
-	previousAccount := a.currentAccount
 	a.currentAccount = jid
 	a.mu.Unlock()
-
-	// Load roster from database when switching to a different non-empty account
-	if jid != previousAccount && jid != "" {
-		a.loadRosterFromDB(jid)
-	}
 }
 
 // WindowState represents a saved window
@@ -1466,10 +1472,6 @@ func (a *App) LoadWindowState() ([]WindowState, error) {
 	return windows, nil
 }
 
-// loadRosterFromDB loads cached roster from database for an account
-func (a *App) loadRosterFromDB(accountJID string) {
-}
-
 // doConnect performs the actual XMPP connection
 func (a *App) doConnect(jidStr, password, server string, port int, isSession bool) tea.Cmd {
 	return func() tea.Msg {
@@ -1493,11 +1495,8 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		// Each account maintains its own connection in the clients map
 		a.mu.Unlock()
 
-		// Load cached roster from database while connecting
-		a.loadRosterFromDB(jidStr)
-
-		// Notify UI of roster loaded from cache and status change
-		a.sendEvent(EventMsg{Type: EventRosterUpdate})
+		// Notify UI that roster sync from server is in progress.
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: true}})
 		a.sendEvent(EventMsg{Type: EventPresence})
 
 		// Create new client
@@ -1514,6 +1513,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.status = "failed"
 			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			return ConnectResultMsg{
 				Success: false,
 				JID:     jidStr,
@@ -1534,6 +1534,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.accountStatuses[jidStr] = "offline"
 			delete(a.clients, jidStr)
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
 		})
 
@@ -1651,7 +1652,9 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 
 			a.mu.Unlock()
+
 			a.sendEvent(EventMsg{Type: EventRosterUpdate})
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
 		})
 
 		if err := newClient.Connect(); err != nil {
@@ -1660,6 +1663,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.status = "failed"
 			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			return ConnectResultMsg{
 				Success: false,
 				JID:     jidStr,
@@ -1691,6 +1695,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 
 		go func() {
 			if err := newClient.RequestRoster(); err != nil {
+				a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 				a.sendEvent(EventMsg{Type: EventError, Data: "Failed to request roster: " + err.Error()})
 			}
 		}()
@@ -1765,6 +1770,7 @@ func (a *App) DoDisconnect(jidStr string) tea.Cmd {
 		}
 
 		a.sendEvent(EventMsg{Type: EventDisconnected})
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 		return DisconnectResultMsg{
 			Success: true,
 			JID:     jidStr,
@@ -1865,9 +1871,6 @@ func (a *App) DoAddContactForAccount(accountJID, contactJID, name, group string)
 			}
 		}
 
-		// Add to local roster immediately for optimistic UI update
-		a.addContactToLocalRoster(accountJID, contactJID, name, group)
-
 		return AddContactResultMsg{
 			Success:    true,
 			AccountJID: accountJID,
@@ -1888,9 +1891,9 @@ func (a *App) addContactToLocalRoster(accountJID, contactJID, name, group string
 
 	a.mu.Lock()
 
-	// Check if already exists
+	// Check if already exists for this account
 	for _, r := range a.rosters {
-		if r.JID == contactJID {
+		if r.AccountJID == accountJID && r.JID == contactJID {
 			a.mu.Unlock()
 			return
 		}
@@ -1975,11 +1978,15 @@ func (a *App) RequestRosterRefreshForAccount(accountJID string) tea.Cmd {
 		a.mu.RUnlock()
 
 		if client == nil || !client.IsConnected() {
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
 			return nil
 		}
 
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: true}})
+
 		// Request roster from server (this will trigger EventRosterUpdate when complete)
 		if err := client.RequestRoster(); err != nil {
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
 			return nil
 		}
 
@@ -2196,10 +2203,12 @@ func (a *App) GetContactsForAccount(accountJID string) []roster.Roster {
 	defer a.mu.RUnlock()
 
 	if accountJID == "" {
-		return a.rosters // Return all if no account specified
+		out := make([]roster.Roster, len(a.rosters))
+		copy(out, a.rosters)
+		return out // Return all if no account specified
 	}
 
-	var filtered []roster.Roster
+	filtered := make([]roster.Roster, 0, len(a.rosters))
 	for _, r := range a.rosters {
 		if r.AccountJID == accountJID {
 			filtered = append(filtered, r)

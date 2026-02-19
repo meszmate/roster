@@ -80,7 +80,12 @@ type Model struct {
 	focusSection        Section
 	maxVisibleAccounts  int
 	maxExpandedAccounts int
+
+	loading      bool
+	spinnerFrame int
 }
+
+var loadingFrames = []string{"|", "/", "-", `\`}
 
 // New creates a new roster model
 func New(styles *theme.Styles) Model {
@@ -94,7 +99,31 @@ func New(styles *theme.Styles) Model {
 		focusSection:        SectionContacts,
 		maxVisibleAccounts:  3,
 		maxExpandedAccounts: 6, // Show more when focused, but don't take all space
+		loading:             false,
+		spinnerFrame:        0,
 	}
+}
+
+// SetLoading sets roster loading state.
+func (m Model) SetLoading(loading bool) Model {
+	m.loading = loading
+	if !loading {
+		m.spinnerFrame = 0
+	}
+	return m
+}
+
+// IsLoading returns true if roster is currently loading from server.
+func (m Model) IsLoading() bool {
+	return m.loading
+}
+
+// AdvanceLoadingSpinner advances loading animation by one frame.
+func (m Model) AdvanceLoadingSpinner() Model {
+	if m.loading {
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(loadingFrames)
+	}
+	return m
 }
 
 // SetContacts sets the roster entries (alias for SetRosters for compatibility)
@@ -577,6 +606,9 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	headerText := "Roster"
+	if m.loading {
+		headerText = fmt.Sprintf("Roster %s loading...", loadingFrames[m.spinnerFrame%len(loadingFrames)])
+	}
 	if m.filterMode {
 		headerText = fmt.Sprintf("Filter: %s", m.filterQuery)
 	}

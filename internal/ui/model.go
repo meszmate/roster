@@ -88,6 +88,17 @@ type Model struct {
 
 	// Pending target account for add-contact dialog.
 	addContactAccountJID string
+
+	// Roster loading state by account for sidebar indicator.
+	rosterLoadingByAccount map[string]bool
+}
+
+type rosterSpinnerTickMsg struct{}
+
+func rosterSpinnerTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return rosterSpinnerTickMsg{}
+	})
 }
 
 // NewModel creates a new root model
@@ -102,19 +113,20 @@ func NewModel(application *app.App) Model {
 	keysManager := keybindings.NewManager()
 
 	return Model{
-		app:         application,
-		focus:       FocusRoster,
-		showRoster:  true,
-		keys:        keysManager,
-		themes:      themeManager,
-		roster:      roster.New(themeManager.Styles()),
-		chat:        chat.New(themeManager.Styles()),
-		statusbar:   statusbar.New(themeManager.Styles()),
-		commandline: commandline.New(themeManager.Styles()),
-		windows:     windows.New(themeManager.Styles()),
-		dialog:      dialogs.New(themeManager.Styles()),
-		settings:    settings.New(cfg, themeManager.Styles(), themeManager.AvailableThemes()),
-		muc:         muc.New(themeManager.Styles()),
+		app:                    application,
+		focus:                  FocusRoster,
+		showRoster:             true,
+		keys:                   keysManager,
+		themes:                 themeManager,
+		roster:                 roster.New(themeManager.Styles()),
+		chat:                   chat.New(themeManager.Styles()),
+		statusbar:              statusbar.New(themeManager.Styles()),
+		commandline:            commandline.New(themeManager.Styles()),
+		windows:                windows.New(themeManager.Styles()),
+		dialog:                 dialogs.New(themeManager.Styles()),
+		settings:               settings.New(cfg, themeManager.Styles(), themeManager.AvailableThemes()),
+		muc:                    muc.New(themeManager.Styles()),
+		rosterLoadingByAccount: make(map[string]bool),
 	}
 }
 
@@ -213,6 +225,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focus = FocusChat
 		m.keys.SetMode(keybindings.ModeInsert)
 
+	case roster.AccountSelectMsg:
+		// Account selected in roster (Enter on accounts section)
+		if msg.JID != "" {
+			m.app.SwitchActiveAccount(msg.JID)
+			m.windows = m.windows.SetAccountForActive(msg.JID)
+			m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(msg.JID))
+			m.viewMode = ViewModeAccountDetails
+			m.detailAccountJID = msg.JID
+			m.chat = m.chat.SetStatusMsg("Switched to " + msg.JID)
+			cmds = append(cmds, m.app.RequestRosterRefreshForAccount(msg.JID))
+		}
+
 	case chat.SendMsg:
 		// User wants to send a message
 		if msg.To != "" && msg.Body != "" {
@@ -264,6 +288,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog.IsLoading() {
 			m.dialog = m.dialog.AdvanceSpinner()
 			cmds = append(cmds, dialogs.SpinnerTick())
+		}
+
+	case rosterSpinnerTickMsg:
+		if m.roster.IsLoading() {
+			m.roster = m.roster.AdvanceLoadingSpinner()
+			cmds = append(cmds, rosterSpinnerTick())
 		}
 
 	case dialogs.CancelOperationMsg:
@@ -552,6 +582,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		// 'i' key: enter insert mode for typing
 		m.keys.SetMode(keybindings.ModeInsert)
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			// If a contact is selected in roster, open chat first so typing sends there.
+			if m.roster.FocusSection() == roster.SectionContacts {
+				if jid := m.roster.SelectedJID(); jid != "" {
+					m.openChat(jid)
+				}
+			}
+			m.viewMode = ViewModeNormal
 			m.focus = FocusChat
 		}
 
@@ -600,6 +637,19 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.chat = m.chat.ScrollUp()
 			}
 		}
+		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		}
 
 	case keybindings.ActionMoveDown:
 		count := m.keys.Count()
@@ -610,10 +660,34 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.chat = m.chat.ScrollDown()
 			}
 		}
+		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		}
 
 	case keybindings.ActionMoveTop:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.MoveToTop()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.ScrollToTop()
 		}
@@ -621,6 +695,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionMoveBottom:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.MoveToBottom()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.ScrollToBottom()
 		}
@@ -628,6 +713,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionHalfPageUp:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.PageUp()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.HalfPageUp()
 		}
@@ -635,24 +731,40 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionHalfPageDown:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.PageDown()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.HalfPageDown()
 		}
 
 	case keybindings.ActionOpenChat:
-		// Enter key: show details when on roster, open chat from details view
+		// Enter key: open chat directly from contacts, show account details for accounts.
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
 				// Show account details
 				if jid := m.roster.SelectedAccountJID(); jid != "" {
 					m.viewMode = ViewModeAccountDetails
 					m.detailAccountJID = jid
+					m.detailContactJID = ""
 				}
 			} else {
-				// Show contact details
+				// Open contact chat directly and enter insert mode for immediate typing.
 				if jid := m.roster.SelectedJID(); jid != "" {
-					m.viewMode = ViewModeContactDetails
-					m.detailContactJID = jid
+					m.openChat(jid)
+					m.viewMode = ViewModeNormal
+					m.detailContactJID = ""
+					m.detailAccountJID = ""
+					m.focus = FocusChat
+					m.keys.SetMode(keybindings.ModeInsert)
 				}
 			}
 		} else if m.viewMode == ViewModeContactDetails {
@@ -753,6 +865,33 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.dialog = m.dialog.ShowContactInfo(jid)
 				m.focus = FocusDialog
 			}
+		} else if m.focus == FocusChat {
+			if jid := m.windows.ActiveJID(); jid != "" {
+				contactData := m.getContactDetailData(jid)
+				m.chat = m.chat.SetContactData(&contactData)
+				m.chat = m.chat.ToggleInfoExpanded()
+			}
+		}
+
+	case keybindings.ActionShowDetails:
+		if m.focus == FocusChat {
+			if jid := m.windows.ActiveJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		} else if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		}
 
 	case keybindings.ActionShowSettings:
@@ -773,6 +912,11 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionFocusAccounts:
 		m.focus = FocusAccounts
 		m.roster = m.roster.MoveToAccounts()
+		if jid := m.roster.SelectedAccountJID(); jid != "" {
+			m.viewMode = ViewModeAccountDetails
+			m.detailAccountJID = jid
+			m.detailContactJID = ""
+		}
 
 	case keybindings.ActionToggleAccountList:
 		m.roster = m.roster.ToggleAccountList()
@@ -956,6 +1100,8 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 							m.viewMode = ViewModeAccountDetails
 							m.detailAccountJID = jid
 							m.chat = m.chat.SetStatusMsg("Switched to " + jid)
+							// Fetch latest roster from server for the selected account.
+							return m.app.RequestRosterRefreshForAccount(jid)
 						}
 						break
 					}
@@ -1358,6 +1504,7 @@ func (m *Model) showContextHelp() {
 				}
 				content = sb.String()
 			}
+			content += "\n\nKeys: gi inline info, gd full details"
 		}
 
 	case FocusRoster, FocusAccounts:
@@ -1379,7 +1526,7 @@ func (m *Model) showContextHelp() {
 						if acc.Resource != "" {
 							content += "Resource: " + acc.Resource + "\n"
 						}
-						content += "\ni=details  e=edit  C=connect"
+						content += "\n\nEnter/i=details  e=edit  c=connect"
 						break
 					}
 				}
@@ -1497,6 +1644,10 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 	case app.EventRosterUpdate:
 		contacts := m.app.GetContacts()
 		m.roster = m.roster.SetContacts(contacts)
+		if jid := m.windows.ActiveJID(); jid != "" {
+			contactData := m.getContactDetailData(jid)
+			m.chat = m.chat.SetContactData(&contactData)
+		}
 
 	case app.EventMessage:
 		switch msg := event.Data.(type) {
@@ -1542,10 +1693,29 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 			if presence.StatusMsg != "" {
 				m.roster = m.roster.UpdatePresenceMessage(presence.JID, presence.StatusMsg)
 			}
+			if jid := m.windows.ActiveJID(); jid != "" && jid == presence.JID {
+				contactData := m.getContactDetailData(jid)
+				m.chat = m.chat.SetContactData(&contactData)
+			}
 		}
 		// Check if we're connecting
 		if m.app.Status() == "connecting" {
 			m.chat = m.chat.SetStatusMsg("Connecting to " + m.app.CurrentAccount() + "...")
+		}
+
+	case app.EventRosterLoading:
+		if update, ok := event.Data.(app.RosterLoadingUpdate); ok {
+			if update.Loading {
+				m.rosterLoadingByAccount[update.AccountJID] = true
+			} else {
+				delete(m.rosterLoadingByAccount, update.AccountJID)
+			}
+		}
+		anyLoading := len(m.rosterLoadingByAccount) > 0
+		wasLoading := m.roster.IsLoading()
+		m.roster = m.roster.SetLoading(anyLoading)
+		if anyLoading && !wasLoading {
+			return rosterSpinnerTick()
 		}
 
 	case app.EventConnected:
@@ -1592,8 +1762,11 @@ func (m *Model) openChat(jid string) {
 		return
 	}
 	history := m.app.GetChatHistory(jid)
+	contactData := m.getContactDetailData(jid)
 	m.chat = m.chat.SetJID(jid)
 	m.chat = m.chat.SetHistory(history)
+	m.chat = m.chat.SetContactData(&contactData)
+	m.chat = m.chat.SetInfoExpanded(false)
 }
 
 // loadActiveWindow loads the content for the active window
@@ -1607,12 +1780,16 @@ func (m *Model) loadActiveWindow() {
 	jid := m.windows.ActiveJID()
 	if jid != "" {
 		history := m.app.GetChatHistory(jid)
+		contactData := m.getContactDetailData(jid)
 		m.chat = m.chat.SetJID(jid)
 		m.chat = m.chat.SetHistory(history)
+		m.chat = m.chat.SetContactData(&contactData)
 	} else {
 		// Console window - clear chat
 		m.chat = m.chat.SetJID("")
 		m.chat = m.chat.SetHistory(nil)
+		m.chat = m.chat.SetContactData(nil)
+		m.chat = m.chat.SetInfoExpanded(false)
 	}
 }
 

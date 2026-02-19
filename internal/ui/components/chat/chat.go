@@ -87,6 +87,7 @@ type Model struct {
 	headerFocused  bool
 	headerSelected int                // 0=edit, 1=sharing, 2=verify, 3=details
 	contactData    *ContactDetailData // Contact info for header display
+	infoExpanded   bool               // Expanded inline contact info panel
 }
 
 // New creates a new chat model
@@ -103,6 +104,9 @@ func (m Model) SetJID(jid string) Model {
 	m.jid = jid
 	m.input = ""
 	m.cursorPos = 0
+	if jid == "" {
+		m.infoExpanded = false
+	}
 	return m
 }
 
@@ -299,6 +303,18 @@ func (m Model) IsHeaderFocused() bool {
 // SetContactData sets the contact data for header display
 func (m Model) SetContactData(data *ContactDetailData) Model {
 	m.contactData = data
+	return m
+}
+
+// ToggleInfoExpanded toggles the inline contact info panel.
+func (m Model) ToggleInfoExpanded() Model {
+	m.infoExpanded = !m.infoExpanded
+	return m
+}
+
+// SetInfoExpanded sets the inline contact info panel state.
+func (m Model) SetInfoExpanded(expanded bool) Model {
+	m.infoExpanded = expanded
 	return m
 }
 
@@ -659,11 +675,19 @@ func (m Model) View() string {
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
 
+	// Inline contact info panel (compact + optional expanded details).
+	infoLines := m.renderInlineInfo()
+	for _, line := range infoLines {
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
 	// Calculate visible area
 	visibleHeight := m.height - 4 // header + separator + typing indicator
 	if m.headerFocused && m.jid != "" {
 		visibleHeight-- // Account for action buttons line
 	}
+	visibleHeight -= len(infoLines)
 	if visibleHeight < 1 {
 		visibleHeight = 1
 	}
@@ -748,6 +772,63 @@ func (m Model) View() string {
 	}
 
 	return b.String()
+}
+
+func (m Model) renderInlineInfo() []string {
+	if m.jid == "" || m.contactData == nil || m.width <= 2 {
+		return nil
+	}
+
+	maxWidth := m.width - 2
+	lines := []string{}
+
+	status := m.contactData.Status
+	if status == "" {
+		status = "offline"
+	}
+
+	compact := fmt.Sprintf("Info: %s | %s", m.contactData.JID, status)
+	if m.contactData.StatusMsg != "" {
+		compact += " | " + m.contactData.StatusMsg
+	}
+	if m.infoExpanded {
+		compact += " | gi collapse"
+	} else {
+		compact += " | gi expand"
+	}
+	compact += " | gd details"
+	if len(compact) > maxWidth {
+		compact = compact[:maxWidth]
+	}
+	lines = append(lines, m.styles.ChatSystem.Render(compact))
+
+	if !m.infoExpanded {
+		return lines
+	}
+
+	groups := "(none)"
+	if len(m.contactData.Groups) > 0 {
+		groups = strings.Join(m.contactData.Groups, ", ")
+	}
+
+	sharing := "off"
+	if m.contactData.StatusSharing {
+		sharing = "on"
+	}
+
+	details := []string{
+		"  Groups: " + groups,
+		"  Subscription: " + m.contactData.Subscription,
+		"  Status sharing: " + sharing,
+	}
+	for _, detail := range details {
+		if len(detail) > maxWidth {
+			detail = detail[:maxWidth]
+		}
+		lines = append(lines, m.styles.ChatSystem.Render(detail))
+	}
+
+	return lines
 }
 
 // renderMessage renders a single message
