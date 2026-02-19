@@ -667,13 +667,19 @@ func (c *Client) RequestRoster() error {
 	return nil
 }
 
-func (c *Client) AddContact(contactJID, name string, groups []string) error {
+func (c *Client) AddContact(contactJID, name string, groups []string) (err error) {
 	c.mu.RLock()
 	if !c.connected {
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
 	c.mu.RUnlock()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("roster add contact failed: %v", r)
+		}
+	}()
 
 	rp, err := c.getRosterPlugin()
 	if err != nil {
@@ -687,13 +693,19 @@ func (c *Client) AddContact(contactJID, name string, groups []string) error {
 	})
 }
 
-func (c *Client) RemoveContact(contactJID string) error {
+func (c *Client) RemoveContact(contactJID string) (err error) {
 	c.mu.RLock()
 	if !c.connected {
 		c.mu.RUnlock()
 		return fmt.Errorf("not connected")
 	}
 	c.mu.RUnlock()
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("roster remove contact failed: %v", r)
+		}
+	}()
 
 	rp, err := c.getRosterPlugin()
 	if err != nil {

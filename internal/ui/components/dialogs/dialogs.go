@@ -218,6 +218,7 @@ func (m Model) ShowAddContact() Model {
 	m.dialogType = DialogAddContact
 	m.title = "Add to Roster"
 	m.message = ""
+	m.data = make(map[string]string)
 	m.inputs = []DialogInput{
 		{Label: "JID", Key: "jid", Value: ""},
 		{Label: "Name", Key: "name", Value: ""},
@@ -1267,6 +1268,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.activeBtn = btnIndex
 					// Trigger the button action
 					values := make(map[string]string)
+					for k, v := range m.data {
+						values[k] = v
+					}
 					for _, input := range m.inputs {
 						values[input.Key] = input.Value
 					}
@@ -1276,9 +1280,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						} else {
 							values[cb.Key] = "false"
 						}
-					}
-					for k, v := range m.data {
-						values[k] = v
 					}
 					confirmed := btnIndex == 0
 					action := ActionCancel
@@ -1393,6 +1394,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 			// Confirm action
 			values := make(map[string]string)
+			for k, v := range m.data {
+				values[k] = v
+			}
 			for _, input := range m.inputs {
 				values[input.Key] = input.Value
 			}
@@ -1403,10 +1407,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					values[cb.Key] = "false"
 				}
 			}
-			for k, v := range m.data {
-				values[k] = v
-			}
-
 			confirmed := m.activeBtn == 0 // First button is confirm
 			action := ActionCancel
 			if confirmed {

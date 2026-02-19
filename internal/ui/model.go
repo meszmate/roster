@@ -85,6 +85,9 @@ type Model struct {
 
 	// Edit state for account editing
 	accountEditData chat.AccountEditData
+
+	// Pending target account for add-contact dialog.
+	addContactAccountJID string
 }
 
 // NewModel creates a new root model
@@ -313,6 +316,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog.IsLoading() && m.dialog.GetOperationType() == dialogs.OpAddContact {
 			m.dialog = m.dialog.Hide()
 		}
+		m.addContactAccountJID = ""
 		// Handle add contact result
 		if msg.Success {
 			displayName := msg.Name
@@ -322,7 +326,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat = m.chat.SetStatusMsg("Added to roster: " + displayName)
 			m.focus = FocusRoster
 			// Trigger roster refresh from server
-			cmds = append(cmds, m.app.RequestRosterRefresh())
+			cmds = append(cmds, m.app.RequestRosterRefreshForAccount(msg.AccountJID))
 			// Immediately refresh roster from local state (optimistic update)
 			m.roster = m.roster.SetContacts(m.app.GetContacts())
 		} else {
@@ -721,12 +725,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 
 	case keybindings.ActionAddContact:
+		targetAccount := m.windows.GetActiveAccountJID()
+		if targetAccount == "" {
+			targetAccount = m.app.CurrentAccount()
+		}
 		// Require an account to be selected before adding contacts
-		if m.app.CurrentAccount() == "" {
+		if targetAccount == "" {
 			m.dialog = m.dialog.ShowError("Select an account first to add contacts.")
 			m.focus = FocusDialog
 			return nil
 		}
+		m.addContactAccountJID = targetAccount
 		m.dialog = m.dialog.ShowAddContact()
 		m.focus = FocusDialog
 
@@ -1589,6 +1598,12 @@ func (m *Model) openChat(jid string) {
 
 // loadActiveWindow loads the content for the active window
 func (m *Model) loadActiveWindow() {
+	accountJID := m.windows.GetActiveAccountJID()
+	if accountJID != "" && accountJID != m.app.CurrentAccount() {
+		m.app.SwitchActiveAccount(accountJID)
+		m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(accountJID))
+	}
+
 	jid := m.windows.ActiveJID()
 	if jid != "" {
 		history := m.app.GetChatHistory(jid)
@@ -1927,17 +1942,27 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 		}
 
 	case dialogs.DialogAddContact:
+		if !result.Confirmed {
+			m.addContactAccountJID = ""
+		}
 		if result.Confirmed {
 			jid := result.Values["jid"]
 			name := result.Values["name"]
 			group := result.Values["group"]
+			targetAccount := m.addContactAccountJID
+			if targetAccount == "" {
+				targetAccount = m.windows.GetActiveAccountJID()
+			}
+			if targetAccount == "" {
+				targetAccount = m.app.CurrentAccount()
+			}
 			if jid != "" {
 				// Show loading dialog with spinner
-				m.dialog = m.dialog.ShowLoading("Adding to roster: "+jid+"...", dialogs.OpAddContact)
+				m.dialog = m.dialog.ShowLoading("Adding to roster ("+targetAccount+"): "+jid+"...", dialogs.OpAddContact)
 				m.focus = FocusDialog
 				// Return both the add contact command and spinner tick
 				return tea.Batch(
-					m.app.DoAddContact(jid, name, group),
+					m.app.DoAddContactForAccount(targetAccount, jid, name, group),
 					dialogs.SpinnerTick(),
 					m.app.OperationTimeout(dialogs.OpAddContact, 30), // 30 second timeout
 				)

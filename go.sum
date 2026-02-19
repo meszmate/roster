@@ -48,6 +48,8 @@ github.com/mattn/go-sqlite3 v1.14.24 h1:tpSp2G2KyMnnQu99ngJ47EIkWVmliIizyZBfPrBW
 github.com/mattn/go-sqlite3 v1.14.24/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/meszmate/xmpp-go v0.0.0-20260210123917-3d0374d2558b h1:+kXrbANOeqiKoPvwtVo5TmD4Mb3HTA73ftAOcQM/0VM=
 github.com/meszmate/xmpp-go v0.0.0-20260210123917-3d0374d2558b/go.mod h1:Fyazap3CfJ1gFfnvAWZ6xPcJPg2KYFjr0gI4r6K/+pU=
+github.com/meszmate/xmpp-go v0.0.0-20260217134457-64854c8d2283 h1:/uWafIwC6FTbBEOGI51iCnJ4X6bcg5bqPvqp9EK2ci8=
+github.com/meszmate/xmpp-go v0.0.0-20260217134457-64854c8d2283/go.mod h1:Fyazap3CfJ1gFfnvAWZ6xPcJPg2KYFjr0gI4r6K/+pU=
 github.com/meszmate/xmpp-go/crypto/omemo v0.0.0-20260210123917-3d0374d2558b h1:l9HDz7vLUZXKAwibE/z2Kw+Dhc2zxJSZyrweEfy0+Ko=
 github.com/meszmate/xmpp-go/crypto/omemo v0.0.0-20260210123917-3d0374d2558b/go.mod h1:rCPM+Ip4/Mqm+bVDxWPtdZzySW9UjFrmETtEE+xsGbA=
 github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 h1:ZK8zHtRHOkbHy6Mmr5D264iyp3TiX5OmNcI5cIARiQI=

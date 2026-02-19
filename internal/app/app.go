@@ -132,10 +132,11 @@ type ConnectingMsg struct {
 
 // AddContactResultMsg is sent when add contact operation completes
 type AddContactResultMsg struct {
-	Success bool
-	JID     string
-	Name    string
-	Error   string
+	Success    bool
+	AccountJID string
+	JID        string
+	Name       string
+	Error      string
 }
 
 // DisconnectResultMsg is sent when a disconnect operation completes
@@ -1773,12 +1774,22 @@ func (a *App) DoDisconnect(jidStr string) tea.Cmd {
 
 // AddContact adds a contact to the roster and sends a subscription request (sync version)
 func (a *App) AddContact(contactJID, name, group string) error {
+	return a.AddContactForAccount(a.CurrentAccount(), contactJID, name, group)
+}
+
+// AddContactForAccount adds a contact using a specific account.
+func (a *App) AddContactForAccount(accountJID, contactJID, name, group string) error {
+	accountJID = strings.TrimSpace(accountJID)
+	if accountJID == "" {
+		return fmt.Errorf("no account selected")
+	}
+
 	a.mu.RLock()
-	client := a.xmppClient
+	client := a.clients[accountJID]
 	a.mu.RUnlock()
 
 	if client == nil || !client.IsConnected() {
-		return fmt.Errorf("not connected")
+		return fmt.Errorf("account not connected: %s", accountJID)
 	}
 
 	contactJID = strings.TrimSpace(contactJID)
@@ -1819,6 +1830,12 @@ func (a *App) AddContact(contactJID, name, group string) error {
 
 // DoAddContact adds a contact asynchronously and returns a tea.Cmd
 func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
+	return a.DoAddContactForAccount(a.CurrentAccount(), contactJID, name, group)
+}
+
+// DoAddContactForAccount adds a contact asynchronously for a specific account and returns a tea.Cmd.
+func (a *App) DoAddContactForAccount(accountJID, contactJID, name, group string) tea.Cmd {
+	accountJID = strings.TrimSpace(accountJID)
 	// Register the operation
 	a.RegisterOperation(dialogs.OpAddContact, func() {})
 
@@ -1828,42 +1845,46 @@ func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
 		defer func() {
 			if r := recover(); r != nil {
 				result = AddContactResultMsg{
-					Success: false,
-					JID:     contactJID,
-					Name:    name,
-					Error:   fmt.Sprintf("internal error while adding contact: %v", r),
+					Success:    false,
+					AccountJID: accountJID,
+					JID:        contactJID,
+					Name:       name,
+					Error:      fmt.Sprintf("internal error while adding contact: %v", r),
 				}
 			}
 		}()
 
-		err := a.AddContact(contactJID, name, group)
+		err := a.AddContactForAccount(accountJID, contactJID, name, group)
 		if err != nil {
 			return AddContactResultMsg{
-				Success: false,
-				JID:     contactJID,
-				Name:    name,
-				Error:   err.Error(),
+				Success:    false,
+				AccountJID: accountJID,
+				JID:        contactJID,
+				Name:       name,
+				Error:      err.Error(),
 			}
 		}
 
 		// Add to local roster immediately for optimistic UI update
-		a.addContactToLocalRoster(contactJID, name, group)
+		a.addContactToLocalRoster(accountJID, contactJID, name, group)
 
 		return AddContactResultMsg{
-			Success: true,
-			JID:     contactJID,
-			Name:    name,
+			Success:    true,
+			AccountJID: accountJID,
+			JID:        contactJID,
+			Name:       name,
 		}
 	}
 }
 
 // addContactToLocalRoster adds a contact to local roster immediately (optimistic update)
-func (a *App) addContactToLocalRoster(contactJID, name, group string) {
+func (a *App) addContactToLocalRoster(accountJID, contactJID, name, group string) {
 	contactJID = strings.TrimSpace(contactJID)
 	if parsed, err := jid.Parse(contactJID); err == nil {
 		contactJID = parsed.Bare().String()
 	}
 	name = strings.TrimSpace(name)
+	accountJID = strings.TrimSpace(accountJID)
 
 	a.mu.Lock()
 
@@ -1877,14 +1898,19 @@ func (a *App) addContactToLocalRoster(contactJID, name, group string) {
 
 	groups := parseGroupInput(group)
 
-	currentAccount := a.currentAccount
+	if accountJID == "" {
+		accountJID = a.currentAccount
+	}
+	if a.statusSharing == nil {
+		a.statusSharing = make(map[string]bool)
+	}
 
 	newContact := roster.Roster{
 		JID:          contactJID,
 		Name:         name,
 		Groups:       groups,
 		Status:       "offline",
-		AccountJID:   currentAccount,
+		AccountJID:   accountJID,
 		Subscription: "none",
 	}
 
@@ -1932,9 +1958,20 @@ func parseGroupInput(group string) []string {
 
 // RequestRosterRefresh requests a fresh roster from the XMPP server
 func (a *App) RequestRosterRefresh() tea.Cmd {
+	return a.RequestRosterRefreshForAccount(a.CurrentAccount())
+}
+
+// RequestRosterRefreshForAccount requests a fresh roster from the XMPP server for a specific account.
+func (a *App) RequestRosterRefreshForAccount(accountJID string) tea.Cmd {
+	accountJID = strings.TrimSpace(accountJID)
+
 	return func() tea.Msg {
+		if accountJID == "" {
+			return nil
+		}
+
 		a.mu.RLock()
-		client := a.xmppClient
+		client := a.clients[accountJID]
 		a.mu.RUnlock()
 
 		if client == nil || !client.IsConnected() {
