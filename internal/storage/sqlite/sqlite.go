@@ -92,6 +92,7 @@ func (d *DB) migrate() error {
 			name TEXT,
 			groups_json TEXT,
 			subscription TEXT,
+			added_to_roster INTEGER NOT NULL DEFAULT 1,
 			last_updated INTEGER NOT NULL,
 			PRIMARY KEY (account, jid)
 		)`,
@@ -189,6 +190,11 @@ func (d *DB) migrate() error {
 	}
 	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_stanza_id ON messages(stanza_id)`); err != nil {
 		return fmt.Errorf("failed to ensure stanza_id index: %w", err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE roster_cache ADD COLUMN added_to_roster INTEGER NOT NULL DEFAULT 1`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("failed to ensure added_to_roster column: %w", err)
+		}
 	}
 
 	return nil
@@ -299,6 +305,33 @@ func (d *DB) MarkRead(account, jid string) error {
 		ON CONFLICT(account, jid) DO UPDATE SET unread = 0, last_read = excluded.last_read
 	`, account, jid, now)
 	return err
+}
+
+type ChatStateEntry struct {
+	JID    string
+	Unread int
+}
+
+func (d *DB) GetChatStates(account string) ([]ChatStateEntry, error) {
+	rows, err := d.db.Query(`
+		SELECT jid, unread
+		FROM chat_state
+		WHERE account = ?
+	`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ChatStateEntry
+	for rows.Next() {
+		var entry ChatStateEntry
+		if err := rows.Scan(&entry.JID, &entry.Unread); err != nil {
+			return nil, err
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 type Session struct {
@@ -693,10 +726,11 @@ func (d *DB) MessageExists(stanzaID string) (bool, error) {
 }
 
 type RosterEntry struct {
-	JID          string
-	Name         string
-	Groups       []string
-	Subscription string
+	JID           string
+	Name          string
+	Groups        []string
+	Subscription  string
+	AddedToRoster bool
 }
 
 func (d *DB) SaveRoster(account string, entries []RosterEntry) error {
@@ -721,9 +755,9 @@ func (d *DB) SaveRoster(account string, entries []RosterEntry) error {
 		}
 
 		_, err := tx.Exec(`
-			INSERT INTO roster_cache (account, jid, name, groups_json, subscription, last_updated)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, account, entry.JID, entry.Name, groupsJSON, entry.Subscription, time.Now().Unix())
+			INSERT INTO roster_cache (account, jid, name, groups_json, subscription, added_to_roster, last_updated)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, account, entry.JID, entry.Name, groupsJSON, entry.Subscription, boolToInt(entry.AddedToRoster), time.Now().Unix())
 		if err != nil {
 			return err
 		}
@@ -734,7 +768,7 @@ func (d *DB) SaveRoster(account string, entries []RosterEntry) error {
 
 func (d *DB) GetRoster(account string) ([]RosterEntry, error) {
 	rows, err := d.db.Query(`
-		SELECT jid, name, groups_json, subscription
+		SELECT jid, name, groups_json, subscription, added_to_roster
 		FROM roster_cache
 		WHERE account = ?
 		ORDER BY COALESCE(name, jid), jid
@@ -749,8 +783,9 @@ func (d *DB) GetRoster(account string) ([]RosterEntry, error) {
 		var entry RosterEntry
 		var groupsJSON sql.NullString
 		var name, subscription sql.NullString
+		var addedToRoster int
 
-		if err := rows.Scan(&entry.JID, &name, &groupsJSON, &subscription); err != nil {
+		if err := rows.Scan(&entry.JID, &name, &groupsJSON, &subscription, &addedToRoster); err != nil {
 			return nil, err
 		}
 
@@ -763,9 +798,17 @@ func (d *DB) GetRoster(account string) ([]RosterEntry, error) {
 		if groupsJSON.Valid && groupsJSON.String != "" {
 			_ = json.Unmarshal([]byte(groupsJSON.String), &entry.Groups)
 		}
+		entry.AddedToRoster = addedToRoster != 0
 
 		entries = append(entries, entry)
 	}
 
 	return entries, nil
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

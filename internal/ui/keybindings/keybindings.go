@@ -64,6 +64,7 @@ const (
 	// Selection and interaction
 	ActionSelect
 	ActionOpenChat
+	ActionOpenChatNew
 	ActionCloseChat
 	ActionNextWindow
 	ActionPrevWindow
@@ -122,6 +123,7 @@ const (
 
 	// Roster
 	ActionAddContact
+	ActionAddSelectedToRoster
 	ActionRemoveContact
 	ActionRenameContact
 	ActionShowInfo
@@ -243,7 +245,7 @@ func (m *Manager) setupDefaultBindings() {
 		"i":      ActionEnterInsert,
 		"a":      ActionEnterInsertAfter,
 		"I":      ActionEnterInsertLineStart,
-		"A":      ActionEnterInsertLineEnd,
+		"A":      ActionAddSelectedToRoster,
 		":":      ActionEnterCommand,
 		"/":      ActionEnterSearch,
 		"?":      ActionEnterSearchBackward,
@@ -252,6 +254,7 @@ func (m *Manager) setupDefaultBindings() {
 		// Selection
 		"enter": ActionOpenChat,
 		"o":     ActionOpenChat,
+		"O":     ActionOpenChatNew,
 		"q":     ActionCloseChat,
 
 		// Search
@@ -628,25 +631,28 @@ func parseInt(s string) int {
 // ActionName returns a human-readable name for an action
 func ActionName(action Action) string {
 	names := map[Action]string{
-		ActionNone:         "none",
-		ActionMoveUp:       "move up",
-		ActionMoveDown:     "move down",
-		ActionMoveLeft:     "move left",
-		ActionMoveRight:    "move right",
-		ActionMoveTop:      "move to top",
-		ActionMoveBottom:   "move to bottom",
-		ActionPageUp:       "page up",
-		ActionPageDown:     "page down",
-		ActionHalfPageUp:   "half page up",
-		ActionHalfPageDown: "half page down",
-		ActionEnterInsert:  "enter insert mode",
-		ActionEnterCommand: "enter command mode",
-		ActionEnterSearch:  "search",
-		ActionExitMode:     "exit mode",
-		ActionOpenChat:     "open chat",
-		ActionCloseChat:    "close chat",
-		ActionSendMessage:  "send message",
-		ActionQuit:         "quit",
+		ActionNone:                "none",
+		ActionMoveUp:              "move up",
+		ActionMoveDown:            "move down",
+		ActionMoveLeft:            "move left",
+		ActionMoveRight:           "move right",
+		ActionMoveTop:             "move to top",
+		ActionMoveBottom:          "move to bottom",
+		ActionPageUp:              "page up",
+		ActionPageDown:            "page down",
+		ActionHalfPageUp:          "half page up",
+		ActionHalfPageDown:        "half page down",
+		ActionEnterInsert:         "enter insert mode",
+		ActionEnterCommand:        "enter command mode",
+		ActionEnterSearch:         "search",
+		ActionExitMode:            "exit mode",
+		ActionOpenChat:            "open chat",
+		ActionOpenChatNew:         "open chat in new window",
+		ActionCloseChat:           "close chat",
+		ActionAddContact:          "add contact",
+		ActionAddSelectedToRoster: "add selected to roster",
+		ActionSendMessage:         "send message",
+		ActionQuit:                "quit",
 	}
 	if name, ok := names[action]; ok {
 		return name

@@ -30,6 +30,8 @@ type Model struct {
 	windowAccount string
 	syncing       bool
 	syncProgress  string
+	rosterLoading bool
+	rosterSpinner string
 }
 
 // New creates a new status bar model
@@ -96,6 +98,13 @@ func (m Model) SetSyncing(syncing bool, progress string) Model {
 	return m
 }
 
+// SetRosterLoading sets roster loading state.
+func (m Model) SetRosterLoading(loading bool, spinner string) Model {
+	m.rosterLoading = loading
+	m.rosterSpinner = spinner
+	return m
+}
+
 // View renders the status bar
 func (m Model) View() string {
 	if m.width == 0 {
@@ -129,6 +138,16 @@ func (m Model) View() string {
 	syncIndicator := ""
 	if m.syncing {
 		syncIndicator = m.styles.PresenceAway.Render(" [Syncing" + m.syncProgress + "...]")
+	}
+
+	// Roster loading indicator
+	rosterIndicator := ""
+	if m.rosterLoading {
+		spin := m.rosterSpinner
+		if spin == "" {
+			spin = "..."
+		}
+		rosterIndicator = m.styles.PresenceAway.Render(" [Roster " + spin + " loading...]")
 	}
 
 	// Window indicators
@@ -201,7 +220,7 @@ func (m Model) View() string {
 	}
 
 	// Build left and right parts
-	left := fmt.Sprintf(" %s%s%s", modeText, accountSection, syncIndicator)
+	left := fmt.Sprintf(" %s%s%s%s", modeText, accountSection, syncIndicator, rosterIndicator)
 	right := windowsStr + extra + " "
 
 	// Calculate padding

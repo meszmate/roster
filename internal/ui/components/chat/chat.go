@@ -1028,6 +1028,8 @@ func wordWrap(text string, width int) []string {
 type AccountDetailData struct {
 	JID              string
 	Status           string // online, connecting, failed, offline
+	RosterSync       bool
+	RosterSyncFrame  string
 	Server           string
 	Port             int
 	Resource         string
@@ -1048,6 +1050,7 @@ type ContactDetailData struct {
 	StatusMsg     string
 	Groups        []string
 	Subscription  string
+	AddedToRoster bool
 	MyPresence    string // Your custom presence for this contact (empty = default)
 	MyPresenceMsg string
 	LastSeen      time.Time
@@ -1098,6 +1101,13 @@ func (m Model) RenderAccountDetails(acc AccountDetailData) string {
 		statusText = "Offline"
 	}
 	b.WriteString(fmt.Sprintf("  Status: %s %s\n", statusIcon, statusText))
+	if acc.RosterSync {
+		frame := acc.RosterSyncFrame
+		if frame == "" {
+			frame = "..."
+		}
+		b.WriteString(fmt.Sprintf("  Roster sync: %s loading...\n", frame))
+	}
 
 	// JID
 	b.WriteString(fmt.Sprintf("  JID: %s\n", acc.JID))
@@ -1174,7 +1184,7 @@ func (m Model) RenderAccountDetails(acc AccountDetailData) string {
 	// Actions hint at bottom
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
-	b.WriteString(m.styles.ChatSystem.Render("  E=edit  C=connect  D=disconnect  T=toggle auto  X=remove  esc=back"))
+	b.WriteString(m.styles.ChatSystem.Render("  [E] Edit  [C] Connect  [D] Disconnect  [T] Toggle Auto  [X] Remove  [Esc] Back"))
 	b.WriteString("\n")
 
 	return b.String()
@@ -1254,6 +1264,12 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	if contact.Subscription != "" {
 		b.WriteString(fmt.Sprintf("  Subscription: %s\n", contact.Subscription))
 	}
+	if contact.AddedToRoster {
+		b.WriteString("  Source: [ROSTER]\n")
+	} else {
+		b.WriteString("  Source: [INCOMING]\n")
+		b.WriteString(m.styles.ChatSystem.Render("  (Incoming chat only. Press A to add to roster.)") + "\n")
+	}
 
 	b.WriteString("\n")
 
@@ -1317,7 +1333,12 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	// Actions hint at bottom
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
-	b.WriteString(m.styles.ChatSystem.Render("  E=edit  enter=chat  s=toggle sharing  v=verify  esc=back"))
+	actions := "  [E] Edit  [Enter] Chat  [S] Toggle Sharing  [V] Verify"
+	if !contact.AddedToRoster {
+		actions += "  [A] Add to roster"
+	}
+	actions += "  [Esc] Back"
+	b.WriteString(m.styles.ChatSystem.Render(actions))
 	b.WriteString("\n")
 
 	return b.String()

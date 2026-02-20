@@ -27,6 +27,7 @@ import (
 	"github.com/meszmate/xmpp-go/plugins/correction"
 	"github.com/meszmate/xmpp-go/plugins/disco"
 	"github.com/meszmate/xmpp-go/plugins/form"
+	forwardplugin "github.com/meszmate/xmpp-go/plugins/forward"
 	mamplugin "github.com/meszmate/xmpp-go/plugins/mam"
 	"github.com/meszmate/xmpp-go/plugins/muc"
 	omemoplugin "github.com/meszmate/xmpp-go/plugins/omemo"
@@ -224,17 +225,36 @@ func (c *Client) getBookmarksPlugin() (*bookmarks.Plugin, error) {
 	return bp, nil
 }
 
+func (c *Client) getCarbonsPlugin() (*carbons.Plugin, error) {
+	if c.plugins == nil {
+		return nil, fmt.Errorf("plugin manager not initialized")
+	}
+
+	p, ok := c.plugins.Get(carbons.Name)
+	if !ok || p == nil {
+		return nil, fmt.Errorf("carbons plugin not available")
+	}
+
+	cp, ok := p.(*carbons.Plugin)
+	if !ok || cp == nil {
+		return nil, fmt.Errorf("carbons plugin has unexpected type %T", p)
+	}
+
+	return cp, nil
+}
+
 type Message struct {
-	ID          string
-	From        jid.JID
-	To          jid.JID
-	Body        string
-	Type        string
-	Timestamp   time.Time
-	Thread      string
-	Encrypted   bool
-	CorrectedID string
-	Reactions   map[string][]string
+	ID               string
+	From             jid.JID
+	To               jid.JID
+	Body             string
+	Type             string
+	Timestamp        time.Time
+	Thread           string
+	Encrypted        bool
+	ReceiptRequested bool
+	CorrectedID      string
+	Reactions        map[string][]string
 }
 
 type Presence struct {
@@ -419,6 +439,9 @@ func (c *Client) Connect() error {
 	c.connected = true
 
 	go c.serve()
+	go func() {
+		_ = c.EnableCarbons()
+	}()
 
 	if c.onConnect != nil {
 		c.onConnect()
@@ -809,12 +832,117 @@ func (c *Client) handleStanza(ctx context.Context, session *xmp.Session, st stan
 	return nil
 }
 
+func extensionOuterXML(ext stanza.Extension) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := xml.NewEncoder(&buf)
+
+	start := xml.StartElement{
+		Name: ext.XMLName,
+		Attr: ext.Attrs,
+	}
+	if err := enc.EncodeToken(start); err != nil {
+		return nil, err
+	}
+	if err := enc.Flush(); err != nil {
+		return nil, err
+	}
+	if len(ext.Inner) > 0 {
+		if _, err := buf.Write(ext.Inner); err != nil {
+			return nil, err
+		}
+	}
+	if err := enc.EncodeToken(start.End()); err != nil {
+		return nil, err
+	}
+	if err := enc.Flush(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func parseForwardedMessage(raw []byte) (*stanza.Message, error) {
+	var forwarded struct {
+		XMLName xml.Name             `xml:"urn:xmpp:forward:0 forwarded"`
+		Delay   *forwardplugin.Delay `xml:"urn:xmpp:delay delay,omitempty"`
+		Message *stanza.Message      `xml:"message"`
+	}
+
+	if err := xml.Unmarshal(raw, &forwarded); err != nil {
+		return nil, err
+	}
+	if forwarded.Message == nil {
+		return nil, fmt.Errorf("forwarded stanza missing message")
+	}
+	return forwarded.Message, nil
+}
+
+func extensionHasNamespace(extXML []byte, ns string) bool {
+	return bytes.Contains(extXML, []byte(ns))
+}
+
 func (c *Client) handleMessage(msg *stanza.Message) {
 	for _, ext := range msg.Extensions {
 		if ext.XMLName.Space == "urn:xmpp:mam:2" && ext.XMLName.Local == "result" {
 			c.handleMAMResult(msg)
 			return
 		}
+	}
+
+	for _, ext := range msg.Extensions {
+		if ext.XMLName.Space != "urn:xmpp:carbons:2" {
+			continue
+		}
+		if ext.XMLName.Local != "sent" && ext.XMLName.Local != "received" {
+			continue
+		}
+
+		forwardedMsg, err := parseForwardedMessage(ext.Inner)
+		if err != nil || forwardedMsg == nil {
+			continue
+		}
+
+		c.handleMessage(forwardedMsg)
+		return
+	}
+
+	handledReceipt := false
+	for _, ext := range msg.Extensions {
+		extXML, err := extensionOuterXML(ext)
+		if err != nil {
+			continue
+		}
+		isReceiptsNS := ext.XMLName.Space == "urn:xmpp:receipts" || extensionHasNamespace(extXML, "urn:xmpp:receipts")
+		isMarkersNS := ext.XMLName.Space == "urn:xmpp:chat-markers:0" || extensionHasNamespace(extXML, "urn:xmpp:chat-markers:0")
+
+		switch {
+		case isReceiptsNS && ext.XMLName.Local == "received":
+			var received receipts.Received
+			if err := xml.Unmarshal(extXML, &received); err == nil && received.ID != "" {
+				if c.onReceipt != nil {
+					c.onReceipt(received.ID, "delivered")
+				}
+				handledReceipt = true
+			}
+		case isMarkersNS && ext.XMLName.Local == "displayed":
+			var displayed chatmarkers.Displayed
+			if err := xml.Unmarshal(extXML, &displayed); err == nil && displayed.ID != "" {
+				if c.onReceipt != nil {
+					c.onReceipt(displayed.ID, "read")
+				}
+				handledReceipt = true
+			}
+		case isMarkersNS && ext.XMLName.Local == "received":
+			var received chatmarkers.Received
+			if err := xml.Unmarshal(extXML, &received); err == nil && received.ID != "" {
+				if c.onReceipt != nil {
+					c.onReceipt(received.ID, "delivered")
+				}
+				handledReceipt = true
+			}
+		}
+	}
+	if handledReceipt && strings.TrimSpace(msg.Body) == "" {
+		return
 	}
 
 	if c.onMessage == nil {
@@ -836,18 +964,27 @@ func (c *Client) handleMessage(msg *stanza.Message) {
 	}
 
 	for _, ext := range msg.Extensions {
+		extXML, err := extensionOuterXML(ext)
+		if err != nil {
+			continue
+		}
+		isReceiptsNS := ext.XMLName.Space == "urn:xmpp:receipts" || extensionHasNamespace(extXML, "urn:xmpp:receipts")
+
 		if ext.XMLName.Local == "encrypted" {
 			m.Encrypted = true
 		}
+		if isReceiptsNS && ext.XMLName.Local == "request" {
+			m.ReceiptRequested = true
+		}
 		if ext.XMLName.Space == "urn:xmpp:message-correct:0" && ext.XMLName.Local == "replace" {
 			var replace correction.Replace
-			if err := xml.Unmarshal(ext.Inner, &replace); err == nil {
+			if err := xml.Unmarshal(extXML, &replace); err == nil {
 				m.CorrectedID = replace.ID
 			}
 		}
 		if ext.XMLName.Space == "urn:xmpp:reactions:0" && ext.XMLName.Local == "reactions" {
 			var react reactions.Reactions
-			if err := xml.Unmarshal(ext.Inner, &react); err == nil {
+			if err := xml.Unmarshal(extXML, &react); err == nil {
 				if m.Reactions == nil {
 					m.Reactions = make(map[string][]string)
 				}
@@ -858,6 +995,11 @@ func (c *Client) handleMessage(msg *stanza.Message) {
 				m.Reactions[react.ID] = reactionValues
 			}
 		}
+	}
+
+	if strings.TrimSpace(m.Body) == "" && m.CorrectedID == "" && len(m.Reactions) == 0 {
+		// Ignore protocol-only/empty stanzas that are not user-visible chat messages.
+		return
 	}
 
 	c.onMessage(m)
@@ -1085,6 +1227,18 @@ func (c *Client) SendMessage(to, body string) (string, error) {
 	msg.To = toJID
 	msg.ID = id
 	msg.Body = body
+	if reqData, err := xml.Marshal(&receipts.Request{}); err == nil {
+		msg.Extensions = append(msg.Extensions, stanza.Extension{
+			XMLName: xml.Name{Space: "urn:xmpp:receipts", Local: "request"},
+			Inner:   reqData,
+		})
+	}
+	if markableData, err := xml.Marshal(&chatmarkers.Markable{}); err == nil {
+		msg.Extensions = append(msg.Extensions, stanza.Extension{
+			XMLName: xml.Name{Space: "urn:xmpp:chat-markers:0", Local: "markable"},
+			Inner:   markableData,
+		})
+	}
 
 	return id, session.Send(c.ctx, msg)
 }
@@ -1257,6 +1411,41 @@ func (c *Client) RequestRoster() error {
 		return err
 	}
 	c.emitRosterFromStore()
+	return nil
+}
+
+func (c *Client) EnableCarbons() error {
+	c.mu.RLock()
+	if !c.connected {
+		c.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	session := c.session
+	c.mu.RUnlock()
+
+	iq := stanza.NewIQ(stanza.IQSet)
+	queryXML, err := xml.Marshal(carbons.Enable{})
+	if err != nil {
+		return fmt.Errorf("failed to marshal carbons enable iq: %w", err)
+	}
+	iq.Query = queryXML
+
+	_, err = c.sendIQAndWait(session, iq, 8*time.Second)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "feature-not-implemented") ||
+			strings.Contains(lower, "service-unavailable") ||
+			strings.Contains(lower, "not-authorized") {
+			return nil
+		}
+		return fmt.Errorf("carbons enable failed: %w", err)
+	}
+
+	cp, err := c.getCarbonsPlugin()
+	if err == nil {
+		cp.SetEnabled(true)
+	}
+
 	return nil
 }
 

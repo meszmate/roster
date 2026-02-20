@@ -1724,7 +1724,11 @@ func (m Model) View() string {
 		} else {
 			style = m.styles.DialogButton
 		}
-		buttons = append(buttons, style.Render(btn))
+		label := btn
+		if i < 9 {
+			label = "[" + strconv.Itoa(i+1) + "] " + btn
+		}
+		buttons = append(buttons, style.Render(label))
 	}
 	b.WriteString(strings.Join(buttons, "  "))
 
