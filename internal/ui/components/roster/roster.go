@@ -2,6 +2,7 @@ package roster
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,15 +12,17 @@ import (
 
 // Roster represents a roster entry (contact)
 type Roster struct {
-	JID          string
-	Name         string
-	Groups       []string
-	Status       string // online, away, dnd, xa, offline
-	StatusMsg    string
-	Unread       int
-	AccountJID   string // Which account owns this contact
-	StatusHidden bool   // True if we don't share status with this contact
-	Subscription string // "none", "to", "from", "both"
+	JID           string
+	Name          string
+	Groups        []string
+	Status        string // online, away, dnd, xa, offline
+	StatusMsg     string
+	Unread        int
+	Favorite      bool
+	AccountJID    string // Which account owns this contact
+	AddedToRoster bool   // True when this entry comes from roster management, false when discovered from incoming chat only
+	StatusHidden  bool   // True if we don't share status with this contact
+	Subscription  string // "none", "to", "from", "both"
 }
 
 // AccountDisplay represents an account for display in the sidebar
@@ -34,6 +37,7 @@ type AccountDisplay struct {
 	OMEMO       bool   // Encryption enabled
 	Session     bool   // Session-only (not saved)
 	AutoConnect bool   // Auto-connect on startup
+	RosterSync  bool   // True when roster sync is in progress for this account
 }
 
 // Section represents which section is focused in the roster
@@ -80,7 +84,12 @@ type Model struct {
 	focusSection        Section
 	maxVisibleAccounts  int
 	maxExpandedAccounts int
+
+	loading      bool
+	spinnerFrame int
 }
+
+var loadingFrames = []string{"|", "/", "-", `\`}
 
 // New creates a new roster model
 func New(styles *theme.Styles) Model {
@@ -94,7 +103,39 @@ func New(styles *theme.Styles) Model {
 		focusSection:        SectionContacts,
 		maxVisibleAccounts:  3,
 		maxExpandedAccounts: 6, // Show more when focused, but don't take all space
+		loading:             false,
+		spinnerFrame:        0,
 	}
+}
+
+// SetLoading sets roster loading state.
+func (m Model) SetLoading(loading bool) Model {
+	m.loading = loading
+	if !loading {
+		m.spinnerFrame = 0
+	}
+	return m
+}
+
+// IsLoading returns true if roster is currently loading from server.
+func (m Model) IsLoading() bool {
+	return m.loading
+}
+
+// LoadingFrame returns the current loading spinner frame (or empty string when idle).
+func (m Model) LoadingFrame() string {
+	if !m.loading {
+		return ""
+	}
+	return loadingFrames[m.spinnerFrame%len(loadingFrames)]
+}
+
+// AdvanceLoadingSpinner advances loading animation by one frame.
+func (m Model) AdvanceLoadingSpinner() Model {
+	if m.loading {
+		m.spinnerFrame = (m.spinnerFrame + 1) % len(loadingFrames)
+	}
+	return m
 }
 
 // SetContacts sets the roster entries (alias for SetRosters for compatibility)
@@ -104,7 +145,17 @@ func (m Model) SetContacts(rosters []Roster) Model {
 
 // SetRosters sets the roster entries
 func (m Model) SetRosters(rosters []Roster) Model {
-	m.rosters = rosters
+	sorted := make([]Roster, len(rosters))
+	copy(sorted, rosters)
+	// Keep existing order within each bucket, but always render favorites first.
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Favorite == sorted[j].Favorite {
+			return false
+		}
+		return sorted[i].Favorite
+	})
+
+	m.rosters = sorted
 	m.groups = make(map[string][]Roster)
 
 	// Group rosters
@@ -122,6 +173,14 @@ func (m Model) SetRosters(rosters []Roster) Model {
 	for g := range m.groups {
 		m.expandedGroups[g] = true
 	}
+
+	if m.filterMode {
+		m = m.UpdateFilter(m.filterQuery)
+	} else {
+		m.filteredRoster = nil
+	}
+
+	m = m.normalizeContactSelection()
 
 	return m
 }
@@ -179,6 +238,7 @@ func (m Model) SetAccounts(accounts []AccountDisplay) Model {
 	}
 	// Combine: saved first, then session
 	m.accounts = append(saved, session...)
+	m = m.normalizeAccountSelection()
 	return m
 }
 
@@ -216,7 +276,7 @@ func (m Model) SelectedAccountJID() string {
 func (m Model) MoveToAccounts() Model {
 	if len(m.accounts) > 0 {
 		m.focusSection = SectionAccounts
-		m.accountSelected = 0
+		m = m.normalizeAccountSelection()
 	}
 	return m
 }
@@ -224,29 +284,81 @@ func (m Model) MoveToAccounts() Model {
 // MoveToContacts switches focus to the contacts section
 func (m Model) MoveToContacts() Model {
 	m.focusSection = SectionContacts
+	m = m.normalizeContactSelection()
+	return m
+}
+
+func (m Model) normalizeContactSelection() Model {
+	roster := m.rosters
+	if m.filterMode && m.filteredRoster != nil {
+		roster = m.filteredRoster
+	}
+
+	if len(roster) == 0 {
+		m.selected = 0
+		m.offset = 0
+		return m
+	}
+
+	if m.selected < 0 {
+		m.selected = 0
+	}
+	if m.selected >= len(roster) {
+		m.selected = len(roster) - 1
+	}
+
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	if m.offset > m.selected {
+		m.offset = m.selected
+	}
+	maxOffset := len(roster) - 1
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+
+	return m
+}
+
+func (m Model) normalizeAccountSelection() Model {
+	if len(m.accounts) == 0 {
+		m.accountSelected = 0
+		m.accountOffset = 0
+		if m.focusSection == SectionAccounts {
+			m.focusSection = SectionContacts
+		}
+		return m
+	}
+
+	if m.accountSelected < 0 {
+		m.accountSelected = 0
+	}
+	if m.accountSelected >= len(m.accounts) {
+		m.accountSelected = len(m.accounts) - 1
+	}
+
+	if m.accountOffset < 0 {
+		m.accountOffset = 0
+	}
+	if m.accountOffset > m.accountSelected {
+		m.accountOffset = m.accountSelected
+	}
+	maxOffset := len(m.accounts) - 1
+	if m.accountOffset > maxOffset {
+		m.accountOffset = maxOffset
+	}
+
 	return m
 }
 
 // MoveUp moves the selection up
 func (m Model) MoveUp() Model {
-	roster := m.rosters
-	if m.filterMode && m.filteredRoster != nil {
-		roster = m.filteredRoster
-	}
 	if m.focusSection == SectionAccounts {
 		if m.accountSelected > 0 {
 			m.accountSelected--
 			if m.accountSelected < m.accountOffset {
 				m.accountOffset = m.accountSelected
-			}
-		} else {
-			m.focusSection = SectionContacts
-			m.accountOffset = 0
-			if len(roster) > 0 {
-				m.selected = len(roster) - 1
-				if m.selected >= m.offset+m.getContactsHeight()-2 {
-					m.offset = m.selected - m.getContactsHeight() + 3
-				}
 			}
 		}
 	} else {
@@ -271,10 +383,6 @@ func (m Model) MoveDown() Model {
 			if m.selected >= m.offset+m.getContactsHeight()-2 {
 				m.offset = m.selected - m.getContactsHeight() + 3
 			}
-		} else if len(m.accounts) > 0 {
-			m.focusSection = SectionAccounts
-			m.accountSelected = 0
-			m.accountOffset = 0
 		}
 	} else {
 		if m.accountSelected < len(m.accounts)-1 {
@@ -577,6 +685,9 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	headerText := "Roster"
+	if m.loading {
+		headerText = fmt.Sprintf("Roster %s loading...", loadingFrames[m.spinnerFrame%len(loadingFrames)])
+	}
 	if m.filterMode {
 		headerText = fmt.Sprintf("Filter: %s", m.filterQuery)
 	}
@@ -607,6 +718,8 @@ func (m Model) View() string {
 			"",
 			"Quick Keys:",
 			"  ga  Add to roster",
+			"  F   Toggle favorite",
+			"  gf  Filter contacts",
 			"  gj  Join room",
 			"  gs  Settings",
 			"  :1  Window 1",
@@ -916,10 +1029,13 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 
 	// Second line: stats
 	var statsLine string
+	spin := loadingFrames[m.spinnerFrame%len(loadingFrames)]
 	if acc.Status == "connecting" {
-		statsLine = "  connecting..."
+		statsLine = "  connecting " + spin + "..."
 	} else if acc.Status == "disconnecting" {
-		statsLine = "  disconnecting..."
+		statsLine = "  disconnecting " + spin + "..."
+	} else if acc.RosterSync {
+		statsLine = "  roster sync " + spin + "..."
 	} else if acc.Status == "offline" {
 		statsLine = "  offline"
 		if acc.OMEMO {
@@ -931,10 +1047,10 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 		// Online: show unread stats
 		var parts []string
 		if acc.UnreadMsgs > 0 {
-			parts = append(parts, fmt.Sprintf("%d msgs", acc.UnreadMsgs))
+			parts = append(parts, fmt.Sprintf("+%d new messages", acc.UnreadMsgs))
 		}
 		if acc.UnreadChats > 0 {
-			parts = append(parts, fmt.Sprintf("%d chats", acc.UnreadChats))
+			parts = append(parts, fmt.Sprintf("+%d chats", acc.UnreadChats))
 		}
 		if acc.OMEMO {
 			parts = append(parts, "OMEMO")
@@ -943,6 +1059,13 @@ func (m Model) renderAccountWithIndicator(acc AccountDisplay, selected bool, pos
 		}
 		if len(parts) > 0 {
 			statsLine = "  " + strings.Join(parts, " · ")
+		}
+	}
+	if acc.UnreadMsgs > 0 && !strings.Contains(statsLine, "new messages") {
+		if statsLine == "" {
+			statsLine = fmt.Sprintf("  +%d new messages", acc.UnreadMsgs)
+		} else {
+			statsLine += fmt.Sprintf(" · +%d new messages", acc.UnreadMsgs)
 		}
 	}
 
@@ -994,6 +1117,21 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 		name = r.JID
 	}
 
+	sourceTagText := "[ROSTER]"
+	sourceTagStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("35"))
+	if !r.AddedToRoster {
+		sourceTagText = "[INCOMING]"
+		sourceTagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	}
+	sourceTag := sourceTagStyle.Render(sourceTagText)
+	favoriteSymbol := "☆"
+	favoriteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	if r.Favorite {
+		favoriteSymbol = "★"
+		favoriteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	}
+	favoriteTag := favoriteStyle.Render(favoriteSymbol)
+
 	// Build status suffix for non-online entries with status message
 	statusSuffix := ""
 	if r.StatusHidden {
@@ -1010,7 +1148,6 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 		// Online with status message: just show the message
 		statusSuffix = fmt.Sprintf(" (%s)", r.StatusMsg)
 	}
-
 	// Unread indicator
 	unread := ""
 	if r.Unread > 0 {
@@ -1019,9 +1156,11 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 
 	// Calculate available width for name + status
 	// Format: " ● name (status) [N]"
-	// Reserve: 3 (space+indicator+space) + unread length
+	// Reserve: indicator + source-tag + padding + unread length
 	unreadLen := len(unread)
-	maxWidth := m.width - 5 - unreadLen // presence + padding + unread
+	sourceTagLen := len(sourceTagText) + 1
+	favoriteLen := 2                                                 // symbol + following space
+	maxWidth := m.width - 5 - unreadLen - sourceTagLen - favoriteLen // presence + tags + padding + unread
 	if maxWidth < 5 {
 		maxWidth = 5
 	}
@@ -1053,10 +1192,11 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 
 	// Build the content
 	var content string
+	favoritePrefix := favoriteTag + " "
 	if r.Unread > 0 {
-		content = fmt.Sprintf(" %s %s%s", presence, displayText, m.styles.RosterUnread.Render(unread))
+		content = fmt.Sprintf(" %s %s %s%s%s", presence, sourceTag, favoritePrefix, displayText, m.styles.RosterUnread.Render(unread))
 	} else {
-		content = fmt.Sprintf(" %s %s", presence, displayText)
+		content = fmt.Sprintf(" %s %s %s%s", presence, sourceTag, favoritePrefix, displayText)
 	}
 
 	return style.Width(m.width - 2).Render(content)

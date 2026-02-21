@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +19,8 @@ import (
 	"github.com/meszmate/roster/internal/ui/components/chat"
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
-	"github.com/meszmate/roster/internal/xmpp/register"
+	"github.com/meszmate/xmpp-go/jid"
+	"github.com/meszmate/xmpp-go/plugins/register"
 )
 
 // EventType represents the type of event
@@ -28,6 +30,7 @@ const (
 	EventRosterUpdate EventType = iota
 	EventMessage
 	EventPresence
+	EventRosterLoading
 	EventConnected
 	EventDisconnected
 	EventError
@@ -59,6 +62,7 @@ const (
 
 // ChatMessage represents a chat message
 type ChatMessage struct {
+	AccountJID  string
 	ID          string
 	From        string
 	To          string
@@ -91,6 +95,12 @@ type PresenceUpdate struct {
 	JID       string
 	Status    string
 	StatusMsg string
+}
+
+// RosterLoadingUpdate represents roster loading state for an account.
+type RosterLoadingUpdate struct {
+	AccountJID string
+	Loading    bool
 }
 
 // CommandAction represents a command that needs UI interaction
@@ -131,10 +141,11 @@ type ConnectingMsg struct {
 
 // AddContactResultMsg is sent when add contact operation completes
 type AddContactResultMsg struct {
-	Success bool
-	JID     string
-	Name    string
-	Error   string
+	Success    bool
+	AccountJID string
+	JID        string
+	Name       string
+	Error      string
 }
 
 // DisconnectResultMsg is sent when a disconnect operation completes
@@ -217,6 +228,10 @@ type App struct {
 	// Per-account contact unread tracking: accountJID -> contactJID -> unread count
 	contactUnreads map[string]map[string]int
 
+	// Per-account contact metadata
+	contactFavorites       map[string]map[string]bool  // accountJID -> contactJID -> favorite
+	contactLastInteraction map[string]map[string]int64 // accountJID -> contactJID -> unix timestamp
+
 	// Status sharing state: contactJID -> enabled (true = sharing status with contact)
 	statusSharing map[string]bool
 
@@ -261,21 +276,27 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	app := &App{
-		cfg:             cfg,
-		accounts:        accounts,
-		events:          make(chan EventMsg, 100),
-		ctx:             ctx,
-		cancel:          cancel,
-		status:          "offline",
-		chatHistory:     make(map[string][]chat.Message),
-		accountStatuses: make(map[string]string),
-		accountUnreads:  make(map[string]int),
-		clients:         make(map[string]*client.Client),
-		contactUnreads:  make(map[string]map[string]int),
-		statusSharing:   make(map[string]bool),
-		pendingOps:      make(map[dialogs.OperationType]context.CancelFunc),
-		storage:         storage,
+		cfg:                    cfg,
+		accounts:               accounts,
+		events:                 make(chan EventMsg, 100),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		status:                 "offline",
+		chatHistory:            make(map[string][]chat.Message),
+		accountStatuses:        make(map[string]string),
+		accountUnreads:         make(map[string]int),
+		clients:                make(map[string]*client.Client),
+		contactUnreads:         make(map[string]map[string]int),
+		contactFavorites:       map[string]map[string]bool{},
+		contactLastInteraction: map[string]map[string]int64{},
+		statusSharing:          make(map[string]bool),
+		pendingOps:             make(map[dialogs.OperationType]context.CancelFunc),
+		storage:                storage,
 	}
+
+	// Restore cached roster and unread state so UI has immediate data before
+	// a live roster sync completes.
+	app.restorePersistedState()
 
 	return app, nil
 }
@@ -375,7 +396,12 @@ func (a *App) Close() {
 func (a *App) Connected() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.connected
+	for _, c := range a.clients {
+		if c != nil && c.IsConnected() {
+			return true
+		}
+	}
+	return false
 }
 
 // CurrentAccount returns the current account JID
@@ -436,14 +462,19 @@ func (a *App) SetStatusAndSend(status, statusMsg string) error {
 
 // GetContacts returns the roster entries (alias for GetRosters for compatibility)
 func (a *App) GetContacts() []roster.Roster {
-	return a.GetRosters()
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	return a.GetContactsForAccount(accountJID)
 }
 
 // GetRosters returns the roster entries
 func (a *App) GetRosters() []roster.Roster {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.rosters
+	out := make([]roster.Roster, len(a.rosters))
+	copy(out, a.rosters)
+	return out
 }
 
 // GetContactsWithStatusInfo returns roster entries enriched with status sharing info
@@ -475,11 +506,323 @@ func (a *App) SetRosters(rosters []roster.Roster) {
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
 }
 
+func (a *App) restorePersistedState() {
+	if a.storage == nil {
+		return
+	}
+	for _, acc := range a.accounts.Accounts {
+		if acc.JID == "" {
+			continue
+		}
+		a.loadRosterCacheForAccount(acc.JID)
+		a.loadUnreadStateForAccount(acc.JID)
+		a.loadContactMetadataForAccount(acc.JID)
+	}
+}
+
+func (a *App) ensureAccountStateLoaded(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	a.mu.RLock()
+	hasRoster := false
+	for _, r := range a.rosters {
+		if r.AccountJID == accountJID {
+			hasRoster = true
+			break
+		}
+	}
+	_, hasUnreadMap := a.contactUnreads[accountJID]
+	hasAnyUnread := a.accountUnreads[accountJID] > 0
+	_, hasFavorites := a.contactFavorites[accountJID]
+	_, hasInteraction := a.contactLastInteraction[accountJID]
+	a.mu.RUnlock()
+
+	if !hasFavorites || !hasInteraction {
+		a.loadContactMetadataForAccount(accountJID)
+	}
+	if !hasRoster && !hasUnreadMap && !hasAnyUnread {
+		a.loadRosterCacheForAccount(accountJID)
+		a.loadUnreadStateForAccount(accountJID)
+	}
+}
+
+func contactFavoritesStateKey(accountJID string) string {
+	return "contacts:favorites:" + accountJID
+}
+
+func contactInteractionStateKey(accountJID string) string {
+	return "contacts:last_interaction:" + accountJID
+}
+
+func (a *App) loadContactMetadataForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	favorites := make(map[string]bool)
+	if raw, err := a.storage.GetAppState(contactFavoritesStateKey(accountJID)); err == nil && raw != "" {
+		var list []string
+		if err := json.Unmarshal([]byte(raw), &list); err == nil {
+			for _, jid := range list {
+				if jid == "" {
+					continue
+				}
+				favorites[jid] = true
+			}
+		}
+	}
+
+	lastInteraction := make(map[string]int64)
+	if raw, err := a.storage.GetAppState(contactInteractionStateKey(accountJID)); err == nil && raw != "" {
+		_ = json.Unmarshal([]byte(raw), &lastInteraction)
+	}
+
+	a.mu.Lock()
+	a.contactFavorites[accountJID] = favorites
+	a.contactLastInteraction[accountJID] = lastInteraction
+	a.mu.Unlock()
+}
+
+func (a *App) saveContactMetadataForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	a.mu.RLock()
+	favSet := a.contactFavorites[accountJID]
+	interactionMap := a.contactLastInteraction[accountJID]
+	favorites := make([]string, 0, len(favSet))
+	for jid, on := range favSet {
+		if on {
+			favorites = append(favorites, jid)
+		}
+	}
+	sort.Strings(favorites)
+	interactionCopy := make(map[string]int64, len(interactionMap))
+	for jid, ts := range interactionMap {
+		interactionCopy[jid] = ts
+	}
+	a.mu.RUnlock()
+
+	favoritesJSON, err := json.Marshal(favorites)
+	if err == nil {
+		_ = a.storage.SetAppState(contactFavoritesStateKey(accountJID), string(favoritesJSON))
+	}
+	interactionsJSON, err := json.Marshal(interactionCopy)
+	if err == nil {
+		_ = a.storage.SetAppState(contactInteractionStateKey(accountJID), string(interactionsJSON))
+	}
+}
+
+func (a *App) IsContactFavoriteForAccount(accountJID, contactJID string) bool {
+	if accountJID == "" || contactJID == "" {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if favs, ok := a.contactFavorites[accountJID]; ok {
+		return favs[contactJID]
+	}
+	return false
+}
+
+func (a *App) ToggleContactFavoriteForAccount(accountJID, contactJID string) (bool, error) {
+	accountJID = strings.TrimSpace(accountJID)
+	contactJID = strings.TrimSpace(contactJID)
+	if accountJID == "" {
+		return false, fmt.Errorf("no account selected")
+	}
+	if contactJID == "" {
+		return false, fmt.Errorf("no contact selected")
+	}
+
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+
+	a.mu.Lock()
+	if a.contactFavorites[accountJID] == nil {
+		a.contactFavorites[accountJID] = make(map[string]bool)
+	}
+	newState := !a.contactFavorites[accountJID][contactJID]
+	a.contactFavorites[accountJID][contactJID] = newState
+	a.mu.Unlock()
+
+	a.saveContactMetadataForAccount(accountJID)
+	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+
+	return newState, nil
+}
+
+func (a *App) TouchContactInteractionForAccount(accountJID, contactJID string, at time.Time) {
+	accountJID = strings.TrimSpace(accountJID)
+	contactJID = strings.TrimSpace(contactJID)
+	if accountJID == "" || contactJID == "" {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+
+	unix := at.Unix()
+	a.mu.Lock()
+	if a.contactLastInteraction[accountJID] == nil {
+		a.contactLastInteraction[accountJID] = make(map[string]int64)
+	}
+	if unix > a.contactLastInteraction[accountJID][contactJID] {
+		a.contactLastInteraction[accountJID][contactJID] = unix
+	}
+	a.mu.Unlock()
+
+	a.saveContactMetadataForAccount(accountJID)
+}
+
+func (a *App) loadRosterCacheForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	entries, err := a.storage.GetRoster(accountJID)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	indexByJID := make(map[string]int)
+	for i, r := range a.rosters {
+		if r.AccountJID == accountJID {
+			indexByJID[r.JID] = i
+		}
+	}
+
+	for _, entry := range entries {
+		newEntry := roster.Roster{
+			JID:           entry.JID,
+			Name:          entry.Name,
+			Groups:        entry.Groups,
+			Status:        "offline",
+			AccountJID:    accountJID,
+			AddedToRoster: entry.AddedToRoster,
+			Subscription:  entry.Subscription,
+		}
+		if idx, ok := indexByJID[entry.JID]; ok {
+			newEntry.Status = a.rosters[idx].Status
+			newEntry.StatusMsg = a.rosters[idx].StatusMsg
+			newEntry.Unread = a.rosters[idx].Unread
+			if a.rosters[idx].AddedToRoster {
+				newEntry.AddedToRoster = true
+			}
+			a.rosters[idx] = newEntry
+			continue
+		}
+		a.rosters = append(a.rosters, newEntry)
+	}
+}
+
+func (a *App) loadUnreadStateForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	entries, err := a.storage.GetChatStates(accountJID)
+	if err != nil {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.contactUnreads[accountJID] == nil {
+		a.contactUnreads[accountJID] = make(map[string]int)
+	}
+	a.accountUnreads[accountJID] = 0
+
+	knownJIDs := make(map[string]struct{})
+	for _, r := range a.rosters {
+		if r.AccountJID == accountJID {
+			knownJIDs[r.JID] = struct{}{}
+		}
+	}
+
+	for _, entry := range entries {
+		if entry.Unread <= 0 {
+			delete(a.contactUnreads[accountJID], entry.JID)
+			continue
+		}
+		a.contactUnreads[accountJID][entry.JID] = entry.Unread
+		a.accountUnreads[accountJID] += entry.Unread
+
+		if _, exists := knownJIDs[entry.JID]; !exists {
+			a.rosters = append(a.rosters, roster.Roster{
+				JID:           entry.JID,
+				Name:          entry.JID,
+				Status:        "offline",
+				AccountJID:    accountJID,
+				AddedToRoster: false,
+				Subscription:  "none",
+			})
+			knownJIDs[entry.JID] = struct{}{}
+		}
+	}
+}
+
+func (a *App) saveRosterCacheForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	a.mu.RLock()
+	entries := make([]sqlite.RosterEntry, 0)
+	for _, r := range a.rosters {
+		if r.AccountJID != accountJID {
+			continue
+		}
+		entries = append(entries, sqlite.RosterEntry{
+			JID:           r.JID,
+			Name:          r.Name,
+			Groups:        r.Groups,
+			Subscription:  r.Subscription,
+			AddedToRoster: r.AddedToRoster,
+		})
+	}
+	a.mu.RUnlock()
+
+	if err := a.storage.SaveRoster(accountJID, entries); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save roster cache for %s: %v\n", accountJID, err)
+	}
+}
+
+func historyKey(accountJID, contactJID string) string {
+	if accountJID == "" {
+		return contactJID
+	}
+	return accountJID + "|" + contactJID
+}
+
+func historyContactFromKey(key string) string {
+	if idx := strings.Index(key, "|"); idx >= 0 && idx+1 < len(key) {
+		return key[idx+1:]
+	}
+	return key
+}
+
 // GetChatHistory returns chat history for a JID
 func (a *App) GetChatHistory(jid string) []chat.Message {
 	a.mu.RLock()
-	history := a.chatHistory[jid]
 	currentAccount := a.currentAccount
+	key := historyKey(currentAccount, jid)
+	history := a.chatHistory[key]
+	if len(history) == 0 {
+		// Backward compatibility for older in-memory keys.
+		history = a.chatHistory[jid]
+	}
 	a.mu.RUnlock()
 
 	// If we have messages in memory, return them
@@ -522,7 +865,7 @@ func (a *App) GetChatHistory(jid string) []chat.Message {
 
 			// Cache in memory
 			a.mu.Lock()
-			a.chatHistory[jid] = messages
+			a.chatHistory[key] = messages
 			a.mu.Unlock()
 
 			return messages
@@ -534,19 +877,75 @@ func (a *App) GetChatHistory(jid string) []chat.Message {
 
 // AddChatMessage adds a message to chat history
 func (a *App) AddChatMessage(jid string, msg chat.Message) {
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	a.AddChatMessageForAccount(accountJID, jid, msg)
+}
+
+// AddChatMessageForAccount adds a message to chat history for a specific account.
+func (a *App) AddChatMessageForAccount(accountJID, jid string, msg chat.Message) {
+	key := historyKey(accountJID, jid)
+
 	a.mu.Lock()
-	a.chatHistory[jid] = append(a.chatHistory[jid], msg)
-	currentAccount := a.currentAccount
+	if msg.ID != "" {
+		for i, existing := range a.chatHistory[key] {
+			if existing.ID != msg.ID {
+				continue
+			}
+
+			// Avoid duplicate message rows when carbons/MAM echoes a message
+			// we already inserted locally.
+			if existing.Body == "" && msg.Body != "" {
+				existing.Body = msg.Body
+			}
+			if existing.Timestamp.IsZero() && !msg.Timestamp.IsZero() {
+				existing.Timestamp = msg.Timestamp
+			}
+			if existing.From == "" && msg.From != "" {
+				existing.From = msg.From
+			}
+			if existing.To == "" && msg.To != "" {
+				existing.To = msg.To
+			}
+			if msg.Type != "" {
+				existing.Type = msg.Type
+			}
+			if msg.Encrypted {
+				existing.Encrypted = true
+			}
+			if msg.CorrectedID != "" {
+				existing.CorrectedID = msg.CorrectedID
+			}
+			if len(msg.Reactions) > 0 {
+				if existing.Reactions == nil {
+					existing.Reactions = make(map[string]string)
+				}
+				for from, reaction := range msg.Reactions {
+					existing.Reactions[from] = reaction
+				}
+			}
+			existing.Outgoing = msg.Outgoing
+			if msg.Status != chat.StatusNone {
+				existing.Status = msg.Status
+			}
+
+			a.chatHistory[key][i] = existing
+			a.mu.Unlock()
+			return
+		}
+	}
+	a.chatHistory[key] = append(a.chatHistory[key], msg)
 	a.mu.Unlock()
 
 	// Persist to database if enabled
-	if a.storage != nil && currentAccount != "" && a.cfg.Storage.SaveMessages {
+	if a.storage != nil && accountJID != "" && a.cfg.Storage.SaveMessages {
 		msgType := msg.Type
 		if msgType == "" {
 			msgType = "chat"
 		}
 		_ = a.storage.SaveMessage(
-			currentAccount,
+			accountJID,
 			jid,
 			msg.ID,
 			msg.Body,
@@ -557,7 +956,22 @@ func (a *App) AddChatMessage(jid string, msg chat.Message) {
 		)
 	}
 
-	a.sendEvent(EventMsg{Type: EventMessage, Data: msg})
+	a.TouchContactInteractionForAccount(accountJID, jid, msg.Timestamp)
+
+	a.sendEvent(EventMsg{Type: EventMessage, Data: ChatMessage{
+		AccountJID:  accountJID,
+		ID:          msg.ID,
+		From:        msg.From,
+		To:          msg.To,
+		Body:        msg.Body,
+		Timestamp:   msg.Timestamp,
+		Encrypted:   msg.Encrypted,
+		Type:        msg.Type,
+		Outgoing:    msg.Outgoing,
+		Status:      MessageStatus(msg.Status),
+		CorrectedID: msg.CorrectedID,
+		Reactions:   msg.Reactions,
+	}})
 }
 
 // SendChatMessage sends a message and returns a command to handle the result
@@ -601,11 +1015,23 @@ func (a *App) SendChatMessage(to, body string) tea.Cmd {
 
 		// Add to chat history and notify UI
 		a.mu.Lock()
-		a.chatHistory[to] = append(a.chatHistory[to], localMsg)
+		key := historyKey(currentAccount, to)
+		a.chatHistory[key] = append(a.chatHistory[key], localMsg)
 		a.mu.Unlock()
 
 		// Send event to update UI immediately with the local echo
-		a.sendEvent(EventMsg{Type: EventMessage, Data: localMsg})
+		a.sendEvent(EventMsg{Type: EventMessage, Data: ChatMessage{
+			AccountJID: currentAccount,
+			ID:         localMsg.ID,
+			From:       localMsg.From,
+			To:         localMsg.To,
+			Body:       localMsg.Body,
+			Timestamp:  localMsg.Timestamp,
+			Outgoing:   localMsg.Outgoing,
+			Status:     MessageStatus(localMsg.Status),
+		}})
+
+		a.TouchContactInteractionForAccount(currentAccount, to, timestamp)
 
 		// Persist to database if enabled
 		if a.storage != nil && a.cfg.Storage.SaveMessages {
@@ -614,7 +1040,7 @@ func (a *App) SendChatMessage(to, body string) tea.Cmd {
 
 		// After successful send, update status to Sent
 		// The message was accepted by the XMPP library
-		a.UpdateMessageStatus(to, msgID, StatusSent)
+		a.UpdateMessageStatusForAccount(currentAccount, to, msgID, StatusSent)
 
 		return SendMessageResultMsg{
 			Success:   true,
@@ -626,11 +1052,29 @@ func (a *App) SendChatMessage(to, body string) tea.Cmd {
 
 // UpdateMessageStatus updates the status of a message by ID
 func (a *App) UpdateMessageStatus(contactJID, msgID string, status MessageStatus) {
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	a.UpdateMessageStatusForAccount(accountJID, contactJID, msgID, status)
+}
+
+// UpdateMessageStatusForAccount updates the status of a message by ID for a specific account.
+func (a *App) UpdateMessageStatusForAccount(accountJID, contactJID, msgID string, status MessageStatus) {
+	key := historyKey(accountJID, contactJID)
+
 	a.mu.Lock()
-	if messages, ok := a.chatHistory[contactJID]; ok {
+	if messages, ok := a.chatHistory[key]; ok {
 		for i, msg := range messages {
 			if msg.ID == msgID {
 				// Convert to chat.MessageStatus
+				a.chatHistory[key][i].Status = chat.MessageStatus(status)
+				break
+			}
+		}
+	} else if messages, ok := a.chatHistory[contactJID]; ok {
+		// Backward compatibility for older in-memory key format.
+		for i, msg := range messages {
+			if msg.ID == msgID {
 				a.chatHistory[contactJID][i].Status = chat.MessageStatus(status)
 				break
 			}
@@ -662,6 +1106,7 @@ func (a *App) CorrectMessage(to, originalID, newBody string) tea.Cmd {
 	return func() tea.Msg {
 		a.mu.RLock()
 		client := a.clients[a.currentAccount]
+		currentAccount := a.currentAccount
 		a.mu.RUnlock()
 
 		if client == nil || !client.IsConnected() {
@@ -682,8 +1127,18 @@ func (a *App) CorrectMessage(to, originalID, newBody string) tea.Cmd {
 			}
 		}
 
+		key := historyKey(currentAccount, to)
+
 		a.mu.Lock()
-		if messages, ok := a.chatHistory[to]; ok {
+		if messages, ok := a.chatHistory[key]; ok {
+			for i, msg := range messages {
+				if msg.ID == originalID {
+					a.chatHistory[key][i].Body = newBody
+					a.chatHistory[key][i].CorrectedID = originalID
+					break
+				}
+			}
+		} else if messages, ok := a.chatHistory[to]; ok {
 			for i, msg := range messages {
 				if msg.ID == originalID {
 					a.chatHistory[to][i].Body = newBody
@@ -696,7 +1151,8 @@ func (a *App) CorrectMessage(to, originalID, newBody string) tea.Cmd {
 
 		a.sendEvent(EventMsg{
 			Type: EventMessage,
-			Data: chat.Message{
+			Data: ChatMessage{
+				AccountJID:  currentAccount,
 				ID:          newID,
 				To:          to,
 				Body:        newBody,
@@ -715,8 +1171,25 @@ func (a *App) CorrectMessage(to, originalID, newBody string) tea.Cmd {
 }
 
 func (a *App) CorrectMessageInHistory(to, originalID, newBody string) {
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	a.CorrectMessageInHistoryForAccount(accountJID, to, originalID, newBody)
+}
+
+func (a *App) CorrectMessageInHistoryForAccount(accountJID, to, originalID, newBody string) {
+	key := historyKey(accountJID, to)
+
 	a.mu.Lock()
-	if messages, ok := a.chatHistory[to]; ok {
+	if messages, ok := a.chatHistory[key]; ok {
+		for i, msg := range messages {
+			if msg.ID == originalID {
+				a.chatHistory[key][i].Body = newBody
+				a.chatHistory[key][i].CorrectedID = originalID
+				break
+			}
+		}
+	} else if messages, ok := a.chatHistory[to]; ok {
 		for i, msg := range messages {
 			if msg.ID == originalID {
 				a.chatHistory[to][i].Body = newBody
@@ -729,7 +1202,10 @@ func (a *App) CorrectMessageInHistory(to, originalID, newBody string) {
 
 	a.sendEvent(EventMsg{
 		Type: EventMessage,
-		Data: chat.Message{
+		Data: ChatMessage{
+			AccountJID:  accountJID,
+			From:        to,
+			To:          accountJID,
 			Body:        newBody,
 			CorrectedID: originalID,
 		},
@@ -749,8 +1225,27 @@ func (a *App) SendReaction(to, messageID, reaction string) error {
 }
 
 func (a *App) AddReactionToHistory(contactJID, msgID, from, reaction string) {
+	a.mu.RLock()
+	accountJID := a.currentAccount
+	a.mu.RUnlock()
+	a.AddReactionToHistoryForAccount(accountJID, contactJID, msgID, from, reaction)
+}
+
+func (a *App) AddReactionToHistoryForAccount(accountJID, contactJID, msgID, from, reaction string) {
+	key := historyKey(accountJID, contactJID)
+
 	a.mu.Lock()
-	if messages, ok := a.chatHistory[contactJID]; ok {
+	if messages, ok := a.chatHistory[key]; ok {
+		for i, msg := range messages {
+			if msg.ID == msgID {
+				if a.chatHistory[key][i].Reactions == nil {
+					a.chatHistory[key][i].Reactions = make(map[string]string)
+				}
+				a.chatHistory[key][i].Reactions[from] = reaction
+				break
+			}
+		}
+	} else if messages, ok := a.chatHistory[contactJID]; ok {
 		for i, msg := range messages {
 			if msg.ID == msgID {
 				if a.chatHistory[contactJID][i].Reactions == nil {
@@ -765,9 +1260,12 @@ func (a *App) AddReactionToHistory(contactJID, msgID, from, reaction string) {
 
 	a.sendEvent(EventMsg{
 		Type: EventMessage,
-		Data: chat.Message{
-			ID:        msgID,
-			Reactions: map[string]string{from: reaction},
+		Data: ChatMessage{
+			AccountJID: accountJID,
+			ID:         msgID,
+			From:       contactJID,
+			To:         accountJID,
+			Reactions:  map[string]string{from: reaction},
 		},
 	})
 }
@@ -1105,6 +1603,36 @@ func (a *App) RemoveAccount(jid string) {
 			break
 		}
 	}
+
+	a.mu.Lock()
+	delete(a.clients, jid)
+	delete(a.accountStatuses, jid)
+	delete(a.accountUnreads, jid)
+	delete(a.contactUnreads, jid)
+	delete(a.contactFavorites, jid)
+	delete(a.contactLastInteraction, jid)
+
+	filtered := make([]roster.Roster, 0, len(a.rosters))
+	for _, r := range a.rosters {
+		if r.AccountJID != jid {
+			filtered = append(filtered, r)
+		}
+	}
+	a.rosters = filtered
+
+	if a.currentAccount == jid {
+		a.currentAccount = ""
+		a.connected = false
+		a.status = "offline"
+	}
+	a.mu.Unlock()
+
+	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+	a.sendEvent(EventMsg{Type: EventPresence})
+	if a.storage != nil {
+		_ = a.storage.DeleteAppState(contactFavoritesStateKey(jid))
+		_ = a.storage.DeleteAppState(contactInteractionStateKey(jid))
+	}
 }
 
 // SetDefaultAccount sets the default account
@@ -1298,6 +1826,19 @@ func (a *App) GetAllAccountsDisplay() []AccountDisplayInfo {
 		if status == "" {
 			status = "offline"
 		}
+		// Reconcile reported status with actual socket state to avoid stale
+		// "connecting..." labels after a successful connect.
+		if c, ok := a.clients[acc.JID]; ok {
+			if c.IsConnected() {
+				if status != "disconnecting" {
+					status = "online"
+				}
+			} else if status == "online" {
+				status = "offline"
+			}
+		} else if status == "online" {
+			status = "offline"
+		}
 
 		// Calculate unread messages and chats per account
 		unreadMsgs := a.accountUnreads[acc.JID]
@@ -1339,6 +1880,9 @@ func (a *App) GetAccountUnreadCount(jid string) int {
 func (a *App) SetAccountStatus(jid, status string) {
 	a.mu.Lock()
 	a.accountStatuses[jid] = status
+	if a.currentAccount == jid {
+		a.status = status
+	}
 	a.mu.Unlock()
 }
 
@@ -1375,22 +1919,32 @@ func (a *App) GetUnreadChatsForAccount(accountJID string) int {
 
 // IncrementContactUnread increments unread count for a specific contact under an account
 func (a *App) IncrementContactUnread(accountJID, contactJID string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if accountJID == "" || contactJID == "" {
+		return
+	}
 
+	a.mu.Lock()
 	if a.contactUnreads[accountJID] == nil {
 		a.contactUnreads[accountJID] = make(map[string]int)
 	}
 	a.contactUnreads[accountJID][contactJID]++
+	newCount := a.contactUnreads[accountJID][contactJID]
 	// Also increment total account unreads
 	a.accountUnreads[accountJID]++
+	a.mu.Unlock()
+
+	if a.storage != nil {
+		_ = a.storage.SetUnreadCount(accountJID, contactJID, newCount)
+	}
 }
 
 // ClearContactUnread clears unread count for a specific contact
 func (a *App) ClearContactUnread(accountJID, contactJID string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if accountJID == "" || contactJID == "" {
+		return
+	}
 
+	a.mu.Lock()
 	if contactUnreads, exists := a.contactUnreads[accountJID]; exists {
 		if oldCount, ok := contactUnreads[contactJID]; ok && oldCount > 0 {
 			// Decrease total account unreads by the amount we're clearing
@@ -1401,19 +1955,78 @@ func (a *App) ClearContactUnread(accountJID, contactJID string) {
 		}
 		delete(contactUnreads, contactJID)
 	}
+	a.mu.Unlock()
+
+	if a.storage != nil {
+		_ = a.storage.MarkRead(accountJID, contactJID)
+	}
+}
+
+// EnsureContactInRosterForAccount makes sure a sender exists in the in-memory roster for an account.
+func (a *App) EnsureContactInRosterForAccount(accountJID, contactJID string) {
+	if accountJID == "" || contactJID == "" {
+		return
+	}
+
+	added := false
+
+	a.mu.Lock()
+	for _, r := range a.rosters {
+		if r.AccountJID == accountJID && r.JID == contactJID {
+			a.mu.Unlock()
+			return
+		}
+	}
+
+	a.rosters = append(a.rosters, roster.Roster{
+		JID:           contactJID,
+		Name:          contactJID,
+		Status:        "offline",
+		AccountJID:    accountJID,
+		AddedToRoster: false,
+		Subscription:  "none",
+	})
+	added = true
+	a.mu.Unlock()
+
+	if added {
+		a.saveRosterCacheForAccount(accountJID)
+		a.sendEvent(EventMsg{Type: EventRosterUpdate})
+	}
 }
 
 // SwitchActiveAccount switches to a different account
 func (a *App) SwitchActiveAccount(jid string) {
-	a.mu.Lock()
-	previousAccount := a.currentAccount
-	a.currentAccount = jid
-	a.mu.Unlock()
-
-	// Load roster from database when switching to a different non-empty account
-	if jid != previousAccount && jid != "" {
-		a.loadRosterFromDB(jid)
+	if jid != "" {
+		a.ensureAccountStateLoaded(jid)
 	}
+
+	a.mu.Lock()
+	a.currentAccount = jid
+	if jid == "" {
+		a.status = "offline"
+		a.connected = false
+		a.mu.Unlock()
+		return
+	}
+
+	status := a.accountStatuses[jid]
+	if status == "" {
+		status = "offline"
+	}
+	if c, ok := a.clients[jid]; ok && c != nil && c.IsConnected() {
+		a.connected = true
+		if status != "disconnecting" {
+			status = "online"
+		}
+	} else {
+		a.connected = false
+		if status == "online" {
+			status = "offline"
+		}
+	}
+	a.status = status
+	a.mu.Unlock()
 }
 
 // WindowState represents a saved window
@@ -1464,10 +2077,6 @@ func (a *App) LoadWindowState() ([]WindowState, error) {
 	return windows, nil
 }
 
-// loadRosterFromDB loads cached roster from database for an account
-func (a *App) loadRosterFromDB(accountJID string) {
-}
-
 // doConnect performs the actual XMPP connection
 func (a *App) doConnect(jidStr, password, server string, port int, isSession bool) tea.Cmd {
 	return func() tea.Msg {
@@ -1475,6 +2084,14 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		a.mu.RLock()
 		if client, exists := a.clients[jidStr]; exists && client.IsConnected() {
 			a.mu.RUnlock()
+			a.mu.Lock()
+			a.accountStatuses[jidStr] = "online"
+			if a.currentAccount == jidStr || a.currentAccount == "" {
+				a.currentAccount = jidStr
+				a.status = "online"
+			}
+			a.connected = true
+			a.mu.Unlock()
 			return ConnectResultMsg{
 				Success: true,
 				JID:     jidStr,
@@ -1491,11 +2108,12 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		// Each account maintains its own connection in the clients map
 		a.mu.Unlock()
 
-		// Load cached roster from database while connecting
-		a.loadRosterFromDB(jidStr)
-
-		// Notify UI of roster loaded from cache and status change
+		// Ensure cached roster/unread state is available while network sync runs.
+		a.ensureAccountStateLoaded(jidStr)
 		a.sendEvent(EventMsg{Type: EventRosterUpdate})
+
+		// Notify UI that roster sync from server is in progress.
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: true}})
 		a.sendEvent(EventMsg{Type: EventPresence})
 
 		// Create new client
@@ -1512,6 +2130,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.status = "failed"
 			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			return ConnectResultMsg{
 				Success: false,
 				JID:     jidStr,
@@ -1532,6 +2151,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.accountStatuses[jidStr] = "offline"
 			delete(a.clients, jidStr)
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			a.sendEvent(EventMsg{Type: EventDisconnected, Data: err})
 		})
 
@@ -1540,6 +2160,50 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		})
 
 		newClient.SetMessageHandler(func(msg client.Message) {
+			accountBare := jidStr
+			if parsed, err := jid.Parse(jidStr); err == nil {
+				accountBare = parsed.Bare().String()
+			}
+
+			fromBare := ""
+			if !msg.From.IsZero() {
+				fromBare = msg.From.Bare().String()
+			}
+			toBare := ""
+			if !msg.To.IsZero() {
+				toBare = msg.To.Bare().String()
+			}
+
+			// Determine peer JID and direction. Some servers can reflect sent
+			// messages via carbons; treat those as outgoing to the remote peer.
+			contactJID := fromBare
+			outgoing := false
+			if fromBare == accountBare && toBare != "" && toBare != accountBare {
+				contactJID = toBare
+				outgoing = true
+			}
+			if contactJID == "" && toBare != "" && toBare != accountBare {
+				contactJID = toBare
+			}
+			if contactJID == "" && !msg.From.IsZero() {
+				contactJID = msg.From.Bare().String()
+			}
+			if contactJID == "" {
+				rawFrom := strings.TrimSpace(msg.From.String())
+				if idx := strings.Index(rawFrom, "/"); idx > 0 {
+					rawFrom = rawFrom[:idx]
+				}
+				if rawFrom != "" {
+					contactJID = rawFrom
+				}
+			}
+			if contactJID == "" && toBare != "" {
+				contactJID = toBare
+			}
+			if contactJID == "" {
+				return
+			}
+
 			chatMsg := chat.Message{
 				ID:          msg.ID,
 				From:        msg.From.String(),
@@ -1547,37 +2211,48 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 				Body:        msg.Body,
 				Timestamp:   msg.Timestamp,
 				Encrypted:   msg.Encrypted,
-				Outgoing:    false,
+				Outgoing:    outgoing,
 				CorrectedID: msg.CorrectedID,
 			}
-			contactJID := msg.From.Bare().String()
+			a.EnsureContactInRosterForAccount(jidStr, contactJID)
 			if chatMsg.CorrectedID != "" {
-				a.CorrectMessageInHistory(contactJID, chatMsg.CorrectedID, chatMsg.Body)
+				a.CorrectMessageInHistoryForAccount(jidStr, contactJID, chatMsg.CorrectedID, chatMsg.Body)
 			} else if len(msg.Reactions) > 0 {
 				for targetMsgID, reactions := range msg.Reactions {
 					for _, reaction := range reactions {
-						a.AddReactionToHistory(contactJID, targetMsgID, msg.From.String(), reaction)
+						a.AddReactionToHistoryForAccount(jidStr, contactJID, targetMsgID, msg.From.String(), reaction)
 					}
 				}
 			} else {
-				a.AddChatMessage(contactJID, chatMsg)
-				a.IncrementContactUnread(jidStr, contactJID)
+				if strings.TrimSpace(chatMsg.Body) == "" {
+					// Ignore protocol-only stanzas that slipped through lower-level parsing.
+					return
+				}
+				if !outgoing {
+					a.IncrementContactUnread(jidStr, contactJID)
+				}
+				a.AddChatMessageForAccount(jidStr, contactJID, chatMsg)
 			}
 
-			if msg.ID != "" {
-				go func() {
-					_ = newClient.SendReceipt(msg.From.String(), msg.ID)
-				}()
+			if msg.ID != "" && !outgoing && chatMsg.Body != "" && msg.ReceiptRequested {
+				receiptTo := contactJID
+				go func(to, messageID string) {
+					_ = newClient.SendReceipt(to, messageID)
+				}(receiptTo, msg.ID)
 			}
 		})
 
 		newClient.SetReceiptHandler(func(messageID string, status string) {
-			a.mu.Lock()
+			accountPrefix := jidStr + "|"
+			a.mu.RLock()
 			var contactJID string
-			for jid, messages := range a.chatHistory {
+			for key, messages := range a.chatHistory {
+				if !strings.HasPrefix(key, accountPrefix) {
+					continue
+				}
 				for _, msg := range messages {
 					if msg.ID == messageID {
-						contactJID = jid
+						contactJID = historyContactFromKey(key)
 						break
 					}
 				}
@@ -1585,7 +2260,21 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 					break
 				}
 			}
-			a.mu.Unlock()
+			if contactJID == "" {
+				// Backward compatibility for older in-memory key format.
+				for key, messages := range a.chatHistory {
+					for _, msg := range messages {
+						if msg.ID == messageID {
+							contactJID = historyContactFromKey(key)
+							break
+						}
+					}
+					if contactJID != "" {
+						break
+					}
+				}
+			}
+			a.mu.RUnlock()
 
 			if contactJID != "" {
 				var newStatus MessageStatus
@@ -1597,7 +2286,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 				default:
 					return
 				}
-				a.UpdateMessageStatus(contactJID, messageID, newStatus)
+				a.UpdateMessageStatusForAccount(jidStr, contactJID, messageID, newStatus)
 			}
 		})
 
@@ -1629,12 +2318,13 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 				}
 
 				newEntry := roster.Roster{
-					JID:          itemJID,
-					Name:         item.Name,
-					Groups:       item.Groups,
-					Status:       "offline",
-					AccountJID:   accountJID,
-					Subscription: item.Subscription,
+					JID:           itemJID,
+					Name:          item.Name,
+					Groups:        item.Groups,
+					Status:        "offline",
+					AccountJID:    accountJID,
+					AddedToRoster: true,
+					Subscription:  item.Subscription,
 				}
 
 				if idx, exists := existingByJID[itemJID]; exists {
@@ -1649,7 +2339,10 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			}
 
 			a.mu.Unlock()
+
+			a.saveRosterCacheForAccount(accountJID)
 			a.sendEvent(EventMsg{Type: EventRosterUpdate})
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
 		})
 
 		if err := newClient.Connect(); err != nil {
@@ -1658,6 +2351,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 			a.status = "failed"
 			a.accountStatuses[jidStr] = "failed"
 			a.mu.Unlock()
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 			return ConnectResultMsg{
 				Success: false,
 				JID:     jidStr,
@@ -1672,7 +2366,17 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 		a.currentAccount = jidStr
 		a.status = "online"
 		a.accountStatuses[jidStr] = "online"
+		statusMsg := a.statusMsg
 		a.mu.Unlock()
+
+		// Announce initial presence after bind so the server can route
+		// realtime messages to this resource.
+		if err := newClient.SendPresence("", statusMsg); err != nil {
+			a.sendEvent(EventMsg{
+				Type: EventError,
+				Data: "Failed to send initial presence: " + err.Error(),
+			})
+		}
 
 		if isSession {
 			acc := config.Account{
@@ -1689,6 +2393,7 @@ func (a *App) doConnect(jidStr, password, server string, port int, isSession boo
 
 		go func() {
 			if err := newClient.RequestRoster(); err != nil {
+				a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 				a.sendEvent(EventMsg{Type: EventError, Data: "Failed to request roster: " + err.Error()})
 			}
 		}()
@@ -1763,6 +2468,7 @@ func (a *App) DoDisconnect(jidStr string) tea.Cmd {
 		}
 
 		a.sendEvent(EventMsg{Type: EventDisconnected})
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: jidStr, Loading: false}})
 		return DisconnectResultMsg{
 			Success: true,
 			JID:     jidStr,
@@ -1772,19 +2478,46 @@ func (a *App) DoDisconnect(jidStr string) tea.Cmd {
 
 // AddContact adds a contact to the roster and sends a subscription request (sync version)
 func (a *App) AddContact(contactJID, name, group string) error {
+	return a.AddContactForAccount(a.CurrentAccount(), contactJID, name, group)
+}
+
+// AddContactForAccount adds a contact using a specific account.
+func (a *App) AddContactForAccount(accountJID, contactJID, name, group string) error {
+	accountJID = strings.TrimSpace(accountJID)
+	if accountJID == "" {
+		return fmt.Errorf("no account selected")
+	}
+
 	a.mu.RLock()
-	client := a.xmppClient
+	client := a.clients[accountJID]
 	a.mu.RUnlock()
 
 	if client == nil || !client.IsConnected() {
-		return fmt.Errorf("not connected")
+		return fmt.Errorf("account not connected: %s", accountJID)
 	}
 
-	// Build groups slice
-	var groups []string
-	if group != "" {
-		groups = []string{group}
+	contactJID = strings.TrimSpace(contactJID)
+	name = strings.TrimSpace(name)
+	group = strings.TrimSpace(group)
+
+	if contactJID == "" {
+		return fmt.Errorf("contact JID is required")
 	}
+
+	parsedJID, err := jid.Parse(contactJID)
+	if err != nil {
+		return fmt.Errorf("invalid contact JID: %w", err)
+	}
+	contactJID = parsedJID.Bare().String()
+
+	if contactJID == "" {
+		return fmt.Errorf("invalid contact JID")
+	}
+	if client.JID().Bare().String() == contactJID {
+		return fmt.Errorf("cannot add your own JID to roster")
+	}
+
+	groups := parseGroupInput(group)
 
 	// Add to roster
 	if err := client.AddContact(contactJID, name, groups); err != nil {
@@ -1801,60 +2534,105 @@ func (a *App) AddContact(contactJID, name, group string) error {
 
 // DoAddContact adds a contact asynchronously and returns a tea.Cmd
 func (a *App) DoAddContact(contactJID, name, group string) tea.Cmd {
+	return a.DoAddContactForAccount(a.CurrentAccount(), contactJID, name, group)
+}
+
+// DoAddContactForAccount adds a contact asynchronously for a specific account and returns a tea.Cmd.
+func (a *App) DoAddContactForAccount(accountJID, contactJID, name, group string) tea.Cmd {
+	accountJID = strings.TrimSpace(accountJID)
 	// Register the operation
 	a.RegisterOperation(dialogs.OpAddContact, func() {})
 
-	return func() tea.Msg {
+	return func() (result tea.Msg) {
 		// Mark operation as complete when done (before returning)
 		defer a.CompleteOperation(dialogs.OpAddContact)
+		defer func() {
+			if r := recover(); r != nil {
+				result = AddContactResultMsg{
+					Success:    false,
+					AccountJID: accountJID,
+					JID:        contactJID,
+					Name:       name,
+					Error:      fmt.Sprintf("internal error while adding contact: %v", r),
+				}
+			}
+		}()
 
-		err := a.AddContact(contactJID, name, group)
+		err := a.AddContactForAccount(accountJID, contactJID, name, group)
 		if err != nil {
 			return AddContactResultMsg{
-				Success: false,
-				JID:     contactJID,
-				Name:    name,
-				Error:   err.Error(),
+				Success:    false,
+				AccountJID: accountJID,
+				JID:        contactJID,
+				Name:       name,
+				Error:      err.Error(),
 			}
 		}
 
-		// Add to local roster immediately for optimistic UI update
-		a.addContactToLocalRoster(contactJID, name, group)
+		// Optimistically update local roster so the new contact appears
+		// immediately, even before server roster push arrives.
+		a.addContactToLocalRoster(accountJID, contactJID, name, group)
 
 		return AddContactResultMsg{
-			Success: true,
-			JID:     contactJID,
-			Name:    name,
+			Success:    true,
+			AccountJID: accountJID,
+			JID:        contactJID,
+			Name:       name,
 		}
 	}
 }
 
 // addContactToLocalRoster adds a contact to local roster immediately (optimistic update)
-func (a *App) addContactToLocalRoster(contactJID, name, group string) {
+func (a *App) addContactToLocalRoster(accountJID, contactJID, name, group string) {
+	contactJID = strings.TrimSpace(contactJID)
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+	name = strings.TrimSpace(name)
+	accountJID = strings.TrimSpace(accountJID)
+	if accountJID == "" {
+		a.mu.RLock()
+		accountJID = a.currentAccount
+		a.mu.RUnlock()
+	}
+
 	a.mu.Lock()
+	groups := parseGroupInput(group)
 
-	// Check if already exists
-	for _, r := range a.rosters {
-		if r.JID == contactJID {
-			a.mu.Unlock()
-			return
+	// If an incoming-only contact already exists, promote it to a real roster
+	// entry and merge optional metadata.
+	for i := range a.rosters {
+		if a.rosters[i].AccountJID != accountJID || a.rosters[i].JID != contactJID {
+			continue
 		}
+		if name != "" {
+			a.rosters[i].Name = name
+		}
+		if len(groups) > 0 {
+			a.rosters[i].Groups = groups
+		}
+		a.rosters[i].AddedToRoster = true
+		if a.rosters[i].Subscription == "" || a.rosters[i].Subscription == "none" {
+			a.rosters[i].Subscription = "none"
+		}
+		a.mu.Unlock()
+		a.saveRosterCacheForAccount(accountJID)
+		a.sendEvent(EventMsg{Type: EventRosterUpdate})
+		return
 	}
 
-	var groups []string
-	if group != "" {
-		groups = []string{group}
+	if a.statusSharing == nil {
+		a.statusSharing = make(map[string]bool)
 	}
-
-	currentAccount := a.currentAccount
 
 	newContact := roster.Roster{
-		JID:          contactJID,
-		Name:         name,
-		Groups:       groups,
-		Status:       "offline",
-		AccountJID:   currentAccount,
-		Subscription: "none",
+		JID:           contactJID,
+		Name:          name,
+		Groups:        groups,
+		Status:        "offline",
+		AccountJID:    accountJID,
+		AddedToRoster: true,
+		Subscription:  "none",
 	}
 
 	a.rosters = append(a.rosters, newContact)
@@ -1863,22 +2641,71 @@ func (a *App) addContactToLocalRoster(contactJID, name, group string) {
 
 	a.mu.Unlock()
 
+	a.saveRosterCacheForAccount(accountJID)
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+}
+
+func parseGroupInput(group string) []string {
+	if group == "" {
+		return nil
+	}
+
+	fields := strings.FieldsFunc(group, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+
+	groups := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		g := strings.TrimSpace(field)
+		if g == "" {
+			continue
+		}
+		key := strings.ToLower(g)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		groups = append(groups, g)
+	}
+
+	if len(groups) == 0 {
+		return nil
+	}
+	return groups
 }
 
 // RequestRosterRefresh requests a fresh roster from the XMPP server
 func (a *App) RequestRosterRefresh() tea.Cmd {
-	return func() tea.Msg {
-		a.mu.RLock()
-		client := a.xmppClient
-		a.mu.RUnlock()
+	return a.RequestRosterRefreshForAccount(a.CurrentAccount())
+}
 
-		if client == nil || !client.IsConnected() {
+// RequestRosterRefreshForAccount requests a fresh roster from the XMPP server for a specific account.
+func (a *App) RequestRosterRefreshForAccount(accountJID string) tea.Cmd {
+	accountJID = strings.TrimSpace(accountJID)
+
+	return func() tea.Msg {
+		if accountJID == "" {
 			return nil
 		}
 
+		a.mu.RLock()
+		client := a.clients[accountJID]
+		a.mu.RUnlock()
+
+		if client == nil || !client.IsConnected() {
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
+			return nil
+		}
+
+		a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: true}})
+
 		// Request roster from server (this will trigger EventRosterUpdate when complete)
 		if err := client.RequestRoster(); err != nil {
+			a.sendEvent(EventMsg{Type: EventRosterLoading, Data: RosterLoadingUpdate{AccountJID: accountJID, Loading: false}})
 			return nil
 		}
 
@@ -1904,9 +2731,13 @@ func (a *App) syncMAMForChats(accountJID string, client *client.Client) {
 
 	a.mu.RLock()
 	uniqueJIDs := make(map[string]bool)
-	for jid, messages := range a.chatHistory {
+	accountPrefix := accountJID + "|"
+	for key, messages := range a.chatHistory {
+		if accountJID != "" && !strings.HasPrefix(key, accountPrefix) {
+			continue
+		}
 		if len(messages) > 0 {
-			uniqueJIDs[jid] = true
+			uniqueJIDs[historyContactFromKey(key)] = true
 		}
 	}
 	a.mu.RUnlock()
@@ -2095,15 +2926,68 @@ func (a *App) GetContactsForAccount(accountJID string) []roster.Roster {
 	defer a.mu.RUnlock()
 
 	if accountJID == "" {
-		return a.rosters // Return all if no account specified
+		out := make([]roster.Roster, len(a.rosters))
+		copy(out, a.rosters)
+		for i := range out {
+			if contactUnreads, ok := a.contactUnreads[out[i].AccountJID]; ok {
+				out[i].Unread = contactUnreads[out[i].JID]
+			}
+			if favs, ok := a.contactFavorites[out[i].AccountJID]; ok {
+				out[i].Favorite = favs[out[i].JID]
+			}
+			out[i].StatusHidden = !a.IsStatusSharingEnabled(out[i].JID)
+		}
+		return out // Return all if no account specified
 	}
 
-	var filtered []roster.Roster
+	filtered := make([]roster.Roster, 0, len(a.rosters))
 	for _, r := range a.rosters {
 		if r.AccountJID == accountJID {
-			filtered = append(filtered, r)
+			entry := r
+			if contactUnreads, ok := a.contactUnreads[accountJID]; ok {
+				entry.Unread = contactUnreads[r.JID]
+			}
+			if favs, ok := a.contactFavorites[accountJID]; ok {
+				entry.Favorite = favs[r.JID]
+			}
+			entry.StatusHidden = !a.IsStatusSharingEnabled(r.JID)
+			filtered = append(filtered, entry)
 		}
 	}
+
+	lastInteraction := a.contactLastInteraction[accountJID]
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].Favorite != filtered[j].Favorite {
+			return filtered[i].Favorite
+		}
+
+		var ti, tj int64
+		if lastInteraction != nil {
+			ti = lastInteraction[filtered[i].JID]
+			tj = lastInteraction[filtered[j].JID]
+		}
+		if ti != tj {
+			return ti > tj
+		}
+
+		if filtered[i].Unread != filtered[j].Unread {
+			return filtered[i].Unread > filtered[j].Unread
+		}
+
+		ni := strings.ToLower(strings.TrimSpace(filtered[i].Name))
+		nj := strings.ToLower(strings.TrimSpace(filtered[j].Name))
+		if ni == "" {
+			ni = strings.ToLower(filtered[i].JID)
+		}
+		if nj == "" {
+			nj = strings.ToLower(filtered[j].JID)
+		}
+		if ni == nj {
+			return filtered[i].JID < filtered[j].JID
+		}
+		return ni < nj
+	})
+
 	return filtered
 }
 
@@ -2237,8 +3121,11 @@ func (a *App) ToggleStatusSharing(contactJID string) (bool, error) {
 		return false, fmt.Errorf("no account selected")
 	}
 
-	// Toggle the status sharing state
-	currentState := a.statusSharing[contactJID]
+	// Missing map key means sharing is enabled by default.
+	currentState, exists := a.statusSharing[contactJID]
+	if !exists {
+		currentState = true
+	}
 	newState := !currentState
 	a.statusSharing[contactJID] = newState
 	a.mu.Unlock()
@@ -2275,13 +3162,13 @@ func (a *App) ToggleStatusSharing(contactJID string) (bool, error) {
 func (a *App) GetContactFingerprints(contactJID string) []string {
 	a.mu.RLock()
 	currentAccount := a.currentAccount
-	c := a.xmppClient
 	a.mu.RUnlock()
 
 	if currentAccount == "" {
 		return []string{"No account selected"}
 	}
 
+	c := a.getConnectedClient(currentAccount)
 	if c == nil {
 		return []string{"Not connected"}
 	}
@@ -2366,10 +3253,14 @@ func (a *App) GetOwnFingerprint(accountJID string) (string, uint32) {
 func (a *App) GetContactFingerprintDetails(contactJID string) []OMEMODeviceInfo {
 	a.mu.RLock()
 	currentAccount := a.currentAccount
-	c := a.xmppClient
 	a.mu.RUnlock()
 
-	if currentAccount == "" || c == nil {
+	if currentAccount == "" {
+		return nil
+	}
+
+	c := a.getConnectedClient(currentAccount)
+	if c == nil {
 		return nil
 	}
 
@@ -2402,9 +3293,14 @@ type OMEMODeviceInfo struct {
 // SetOMEMOTrust sets the trust level for a contact's device
 func (a *App) SetOMEMOTrust(contactJID string, deviceID uint32, trustLevel int) error {
 	a.mu.RLock()
-	c := a.xmppClient
+	currentAccount := a.currentAccount
 	a.mu.RUnlock()
 
+	if currentAccount == "" {
+		return fmt.Errorf("no account selected")
+	}
+
+	c := a.getConnectedClient(currentAccount)
 	if c == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -2420,9 +3316,14 @@ func (a *App) SetOMEMOTrust(contactJID string, deviceID uint32, trustLevel int) 
 // DeleteOMEMODevice removes a device from the OMEMO store
 func (a *App) DeleteOMEMODevice(contactJID string, deviceID uint32) error {
 	a.mu.RLock()
-	c := a.xmppClient
+	currentAccount := a.currentAccount
 	a.mu.RUnlock()
 
+	if currentAccount == "" {
+		return fmt.Errorf("no account selected")
+	}
+
+	c := a.getConnectedClient(currentAccount)
 	if c == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -2439,7 +3340,11 @@ func (a *App) DeleteOMEMODevice(contactJID string, deviceID uint32) error {
 func (a *App) IsStatusSharingEnabled(contactJID string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.statusSharing[contactJID]
+	enabled, exists := a.statusSharing[contactJID]
+	if !exists {
+		return true
+	}
+	return enabled
 }
 
 // FetchRegistrationForm fetches the registration form from a server

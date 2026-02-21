@@ -64,6 +64,7 @@ const (
 	// Selection and interaction
 	ActionSelect
 	ActionOpenChat
+	ActionOpenChatNew
 	ActionCloseChat
 	ActionNextWindow
 	ActionPrevWindow
@@ -122,6 +123,8 @@ const (
 
 	// Roster
 	ActionAddContact
+	ActionAddSelectedToRoster
+	ActionToggleFavorite
 	ActionRemoveContact
 	ActionRenameContact
 	ActionShowInfo
@@ -243,7 +246,7 @@ func (m *Manager) setupDefaultBindings() {
 		"i":      ActionEnterInsert,
 		"a":      ActionEnterInsertAfter,
 		"I":      ActionEnterInsertLineStart,
-		"A":      ActionEnterInsertLineEnd,
+		"A":      ActionAddSelectedToRoster,
 		":":      ActionEnterCommand,
 		"/":      ActionEnterSearch,
 		"?":      ActionEnterSearchBackward,
@@ -252,6 +255,7 @@ func (m *Manager) setupDefaultBindings() {
 		// Selection
 		"enter": ActionOpenChat,
 		"o":     ActionOpenChat,
+		"O":     ActionOpenChatNew,
 		"q":     ActionCloseChat,
 
 		// Search
@@ -304,10 +308,14 @@ func (m *Manager) setupDefaultBindings() {
 		"'":       ActionJumpToMark,
 
 		// Roster actions (avoiding ctrl+a for tmux users)
-		"ga": ActionAddContact,    // 'g' prefix + 'a' for add
-		"gx": ActionRemoveContact, // 'g' prefix + 'x' for remove
-		"gR": ActionRenameContact, // 'g' prefix + 'R' for rename (capital)
-		"gi": ActionShowInfo,      // 'g' prefix + 'i' for info
+		"ga": ActionAddContact,     // 'g' prefix + 'a' for add
+		"gx": ActionRemoveContact,  // 'g' prefix + 'x' for remove
+		"gR": ActionRenameContact,  // 'g' prefix + 'R' for rename (capital)
+		"gi": ActionShowInfo,       // 'g' prefix + 'i' for info
+		"gd": ActionShowDetails,    // 'g' prefix + 'd' for full details
+		"f":  ActionToggleFavorite, // Toggle favorite on selected contact
+		"F":  ActionToggleFavorite, // Toggle favorite on selected contact
+		"gF": ActionToggleFavorite, // Alternative favorite toggle
 
 		// MUC (avoiding ctrl conflicts for tmux)
 		"gj": ActionJoinRoom,         // 'g' prefix + 'j' for join
@@ -317,7 +325,7 @@ func (m *Manager) setupDefaultBindings() {
 		"cc": ActionCorrectMessage,   // 'c' prefix + 'c' for correct last message
 		"cr": ActionAddReaction,      // 'c' prefix + 'r' for add reaction
 		"cf": ActionUploadFile,       // 'c' prefix + 'f' for upload file
-		"f":  ActionSearchContacts,   // 'f' for filter/search contacts
+		"gf": ActionSearchContacts,   // 'g' prefix + 'f' for filter/search contacts
 		"ge": ActionExportAccounts,   // 'g' prefix + 'e' for export accounts
 		"gI": ActionImportAccounts,   // 'g' prefix + 'I' (capital) for import accounts
 
@@ -339,6 +347,7 @@ func (m *Manager) setupDefaultBindings() {
 		"H": ActionShowContextHelp, // Show context-sensitive help/info popup
 
 		// Account actions (work when focused on accounts section)
+		"c": ActionAccountConnect,    // Connect to selected account (lowercase alias)
 		"C": ActionAccountConnect,    // Connect to selected account
 		"D": ActionAccountDisconnect, // Disconnect selected account
 		"X": ActionAccountRemove,     // Remove selected account (with confirmation)
@@ -626,25 +635,29 @@ func parseInt(s string) int {
 // ActionName returns a human-readable name for an action
 func ActionName(action Action) string {
 	names := map[Action]string{
-		ActionNone:         "none",
-		ActionMoveUp:       "move up",
-		ActionMoveDown:     "move down",
-		ActionMoveLeft:     "move left",
-		ActionMoveRight:    "move right",
-		ActionMoveTop:      "move to top",
-		ActionMoveBottom:   "move to bottom",
-		ActionPageUp:       "page up",
-		ActionPageDown:     "page down",
-		ActionHalfPageUp:   "half page up",
-		ActionHalfPageDown: "half page down",
-		ActionEnterInsert:  "enter insert mode",
-		ActionEnterCommand: "enter command mode",
-		ActionEnterSearch:  "search",
-		ActionExitMode:     "exit mode",
-		ActionOpenChat:     "open chat",
-		ActionCloseChat:    "close chat",
-		ActionSendMessage:  "send message",
-		ActionQuit:         "quit",
+		ActionNone:                "none",
+		ActionMoveUp:              "move up",
+		ActionMoveDown:            "move down",
+		ActionMoveLeft:            "move left",
+		ActionMoveRight:           "move right",
+		ActionMoveTop:             "move to top",
+		ActionMoveBottom:          "move to bottom",
+		ActionPageUp:              "page up",
+		ActionPageDown:            "page down",
+		ActionHalfPageUp:          "half page up",
+		ActionHalfPageDown:        "half page down",
+		ActionEnterInsert:         "enter insert mode",
+		ActionEnterCommand:        "enter command mode",
+		ActionEnterSearch:         "search",
+		ActionExitMode:            "exit mode",
+		ActionOpenChat:            "open chat",
+		ActionOpenChatNew:         "open chat in new window",
+		ActionCloseChat:           "close chat",
+		ActionAddContact:          "add contact",
+		ActionAddSelectedToRoster: "add selected to roster",
+		ActionToggleFavorite:      "toggle favorite",
+		ActionSendMessage:         "send message",
+		ActionQuit:                "quit",
 	}
 	if name, ok := names[action]; ok {
 		return name

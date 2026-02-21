@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -85,6 +87,29 @@ type Model struct {
 
 	// Edit state for account editing
 	accountEditData chat.AccountEditData
+
+	// Pending target account for add-contact dialog.
+	addContactAccountJID string
+
+	// Roster loading state by account for sidebar indicator.
+	rosterLoadingByAccount map[string]bool
+}
+
+type rosterSpinnerTickMsg struct{}
+
+func rosterSpinnerTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return rosterSpinnerTickMsg{}
+	})
+}
+
+const localRosterOpKey = "__local__favorite_toggle__"
+
+type favoriteToggleResultMsg struct {
+	AccountJID string
+	JID        string
+	Favorite   bool
+	Err        string
 }
 
 // NewModel creates a new root model
@@ -99,19 +124,20 @@ func NewModel(application *app.App) Model {
 	keysManager := keybindings.NewManager()
 
 	return Model{
-		app:         application,
-		focus:       FocusRoster,
-		showRoster:  true,
-		keys:        keysManager,
-		themes:      themeManager,
-		roster:      roster.New(themeManager.Styles()),
-		chat:        chat.New(themeManager.Styles()),
-		statusbar:   statusbar.New(themeManager.Styles()),
-		commandline: commandline.New(themeManager.Styles()),
-		windows:     windows.New(themeManager.Styles()),
-		dialog:      dialogs.New(themeManager.Styles()),
-		settings:    settings.New(cfg, themeManager.Styles(), themeManager.AvailableThemes()),
-		muc:         muc.New(themeManager.Styles()),
+		app:                    application,
+		focus:                  FocusRoster,
+		showRoster:             true,
+		keys:                   keysManager,
+		themes:                 themeManager,
+		roster:                 roster.New(themeManager.Styles()).SetContacts(nil),
+		chat:                   chat.New(themeManager.Styles()),
+		statusbar:              statusbar.New(themeManager.Styles()),
+		commandline:            commandline.New(themeManager.Styles()),
+		windows:                windows.New(themeManager.Styles()),
+		dialog:                 dialogs.New(themeManager.Styles()),
+		settings:               settings.New(cfg, themeManager.Styles(), themeManager.AvailableThemes()),
+		muc:                    muc.New(themeManager.Styles()),
+		rosterLoadingByAccount: make(map[string]bool),
 	}
 }
 
@@ -177,6 +203,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Always treat lowercase 'f' in normal mode as favorite toggle.
+		// This avoids accidental filter-mode entry due pending multi-key prefixes.
+		if m.keys.Mode() == keybindings.ModeNormal &&
+			msg.Type == tea.KeyRunes &&
+			len(msg.Runes) == 1 &&
+			msg.Runes[0] == 'f' &&
+			m.focus != FocusCommandLine &&
+			!m.dialog.Active() {
+			m.keys.SetMode(m.keys.Mode()) // clear pending multi-key state (e.g. stale "g")
+			cmd := m.handleAction(keybindings.ActionToggleFavorite, msg)
+			return m, cmd
+		}
+
+		// While roster filter mode is active, treat keystrokes as filter input
+		// instead of global keybindings.
+		if m.focus == FocusRoster && m.roster.InFilterMode() {
+			cmds = append(cmds, m.updateFocusedComponent(msg)...)
+			return m, tea.Batch(cmds...)
+		}
+
 		// Process key through keybinding manager
 		action := m.keys.HandleKey(msg)
 		cmd := m.handleAction(action, msg)
@@ -209,6 +255,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openChat(msg.JID)
 		m.focus = FocusChat
 		m.keys.SetMode(keybindings.ModeInsert)
+
+	case roster.AccountSelectMsg:
+		// Account selected in roster (Enter on accounts section)
+		if msg.JID != "" {
+			m.app.SwitchActiveAccount(msg.JID)
+			m.windows = m.windows.SetAccountForActive(msg.JID)
+			m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(msg.JID))
+			m.viewMode = ViewModeAccountDetails
+			m.detailAccountJID = msg.JID
+			m.chat = m.chat.SetStatusMsg("Switched to " + msg.JID)
+			cmds = append(cmds, m.app.RequestRosterRefreshForAccount(msg.JID))
+		}
 
 	case chat.SendMsg:
 		// User wants to send a message
@@ -263,6 +321,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, dialogs.SpinnerTick())
 		}
 
+	case rosterSpinnerTickMsg:
+		if m.roster.IsLoading() {
+			m.roster = m.roster.AdvanceLoadingSpinner()
+			cmds = append(cmds, rosterSpinnerTick())
+		}
+
+	case favoriteToggleResultMsg:
+		delete(m.rosterLoadingByAccount, localRosterOpKey)
+		anyLoading := len(m.rosterLoadingByAccount) > 0
+		m.roster = m.roster.SetLoading(anyLoading)
+		if anyLoading {
+			cmds = append(cmds, rosterSpinnerTick())
+		}
+
+		if msg.Err != "" {
+			m.dialog = m.dialog.ShowError("Failed to toggle favorite: " + msg.Err)
+			m.focus = FocusDialog
+		} else {
+			state := "removed from"
+			if msg.Favorite {
+				state = "added to"
+			}
+			m.chat = m.chat.SetStatusMsg(msg.JID + " " + state + " favorites")
+		}
+
+		m.refreshRosterContacts()
+		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
+			contactData := m.getContactDetailData(m.detailContactJID)
+			m.chat = m.chat.SetContactData(&contactData)
+		}
+
 	case dialogs.CancelOperationMsg:
 		// User cancelled an operation
 		m.dialog = m.dialog.Hide()
@@ -313,6 +402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dialog.IsLoading() && m.dialog.GetOperationType() == dialogs.OpAddContact {
 			m.dialog = m.dialog.Hide()
 		}
+		m.addContactAccountJID = ""
 		// Handle add contact result
 		if msg.Success {
 			displayName := msg.Name
@@ -322,9 +412,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chat = m.chat.SetStatusMsg("Added to roster: " + displayName)
 			m.focus = FocusRoster
 			// Trigger roster refresh from server
-			cmds = append(cmds, m.app.RequestRosterRefresh())
+			cmds = append(cmds, m.app.RequestRosterRefreshForAccount(msg.AccountJID))
 			// Immediately refresh roster from local state (optimistic update)
-			m.roster = m.roster.SetContacts(m.app.GetContacts())
+			m.refreshRosterContacts()
 		} else {
 			m.dialog = m.dialog.ShowError("Failed to add to roster: " + msg.Error)
 			m.focus = FocusDialog
@@ -335,7 +425,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.themes.SetTheme(m.app.Config().UI.Theme); err == nil {
 			// Update all component styles
 			styles := m.themes.Styles()
-			m.roster = roster.New(styles).SetContacts(m.app.GetContacts())
+			m.roster = roster.New(styles).SetContacts(m.currentRosterContacts())
 			m.chat = chat.New(styles)
 			m.statusbar = statusbar.New(styles)
 			m.commandline = commandline.New(styles)
@@ -407,6 +497,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.statusbar = m.statusbar.SetConnected(m.app.Connected())
 	m.statusbar = m.statusbar.SetWindows(m.getWindowInfos())
 	m.statusbar = m.statusbar.SetWindowAccount(m.windows.GetActiveAccountJID())
+	m.statusbar = m.statusbar.SetRosterLoading(m.roster.IsLoading(), m.roster.LoadingFrame())
 
 	// Update roster with connected accounts
 	m.roster = m.roster.SetAccounts(m.getAccountDisplays())
@@ -538,6 +629,8 @@ func (m Model) View() string {
 }
 
 // handleAction processes keybinding actions
+//
+//nolint:gocyclo // Central action dispatcher for all keybindings in one place by design.
 func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd {
 	switch action {
 	case keybindings.ActionQuit:
@@ -548,6 +641,13 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		// 'i' key: enter insert mode for typing
 		m.keys.SetMode(keybindings.ModeInsert)
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			// If a contact is selected in roster, open chat first so typing sends there.
+			if m.roster.FocusSection() == roster.SectionContacts {
+				if jid := m.roster.SelectedJID(); jid != "" {
+					m.openChat(jid)
+				}
+			}
+			m.resetDetailViewState()
 			m.focus = FocusChat
 		}
 
@@ -596,6 +696,19 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.chat = m.chat.ScrollUp()
 			}
 		}
+		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		}
 
 	case keybindings.ActionMoveDown:
 		count := m.keys.Count()
@@ -606,10 +719,34 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.chat = m.chat.ScrollDown()
 			}
 		}
+		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		}
 
 	case keybindings.ActionMoveTop:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.MoveToTop()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.ScrollToTop()
 		}
@@ -617,6 +754,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionMoveBottom:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.MoveToBottom()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.ScrollToBottom()
 		}
@@ -624,6 +772,17 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionHalfPageUp:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.PageUp()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.HalfPageUp()
 		}
@@ -631,32 +790,45 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionHalfPageDown:
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			m.roster = m.roster.PageDown()
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		} else if m.focus == FocusChat {
 			m.chat = m.chat.HalfPageDown()
 		}
 
 	case keybindings.ActionOpenChat:
-		// Enter key: show details when on roster, open chat from details view
+		// Enter key: open chat directly from contacts, show account details for accounts.
 		if m.focus == FocusRoster || m.focus == FocusAccounts {
 			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
 				// Show account details
 				if jid := m.roster.SelectedAccountJID(); jid != "" {
 					m.viewMode = ViewModeAccountDetails
 					m.detailAccountJID = jid
+					m.detailContactJID = ""
 				}
 			} else {
-				// Show contact details
+				// Open contact chat directly and enter insert mode for immediate typing.
 				if jid := m.roster.SelectedJID(); jid != "" {
-					m.viewMode = ViewModeContactDetails
-					m.detailContactJID = jid
+					m.openChat(jid)
+					m.resetDetailViewState()
+					m.focus = FocusChat
+					m.keys.SetMode(keybindings.ModeInsert)
 				}
 			}
 		} else if m.viewMode == ViewModeContactDetails {
 			// From contact details, Enter opens the chat
 			if m.detailContactJID != "" {
 				m.openChat(m.detailContactJID)
-				m.viewMode = ViewModeNormal
-				m.detailContactJID = ""
+				m.resetDetailViewState()
 				m.focus = FocusChat
 				m.keys.SetMode(keybindings.ModeInsert)
 			}
@@ -664,6 +836,26 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 			// From account details, Enter connects
 			if m.detailAccountJID != "" {
 				return m.app.ExecuteCommand("connect", []string{m.detailAccountJID})
+			}
+		}
+
+	case keybindings.ActionOpenChatNew:
+		// Explicitly open selected contact in a separate window.
+		if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() != roster.SectionAccounts && m.focus != FocusAccounts {
+				if jid := m.roster.SelectedJID(); jid != "" {
+					m.openChatNewWindow(jid)
+					m.resetDetailViewState()
+					m.focus = FocusChat
+					m.keys.SetMode(keybindings.ModeInsert)
+				}
+			}
+		} else if m.viewMode == ViewModeContactDetails {
+			if m.detailContactJID != "" {
+				m.openChatNewWindow(m.detailContactJID)
+				m.resetDetailViewState()
+				m.focus = FocusChat
+				m.keys.SetMode(keybindings.ModeInsert)
 			}
 		}
 
@@ -677,6 +869,14 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 
 	case keybindings.ActionFocusRoster:
 		m.focus = FocusRoster
+		m.roster = m.roster.MoveToContacts()
+		if jid := m.roster.SelectedJID(); jid != "" {
+			m.viewMode = ViewModeContactDetails
+			m.detailContactJID = jid
+			m.detailAccountJID = ""
+		} else {
+			m.resetDetailViewState()
+		}
 
 	case keybindings.ActionFocusChat:
 		m.focus = FocusChat
@@ -721,14 +921,100 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		}
 
 	case keybindings.ActionAddContact:
+		targetAccount := m.windows.GetActiveAccountJID()
+		if targetAccount == "" {
+			targetAccount = m.app.CurrentAccount()
+		}
 		// Require an account to be selected before adding contacts
-		if m.app.CurrentAccount() == "" {
+		if targetAccount == "" {
 			m.dialog = m.dialog.ShowError("Select an account first to add contacts.")
 			m.focus = FocusDialog
 			return nil
 		}
+		m.addContactAccountJID = targetAccount
 		m.dialog = m.dialog.ShowAddContact()
 		m.focus = FocusDialog
+
+	case keybindings.ActionAddSelectedToRoster:
+		targetJID := ""
+		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
+			targetJID = m.detailContactJID
+		} else if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			targetJID = m.roster.SelectedJID()
+		} else if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			targetJID = m.windows.ActiveJID()
+		}
+
+		if targetJID == "" {
+			return nil
+		}
+
+		targetAccount := m.windows.GetActiveAccountJID()
+		if targetAccount == "" {
+			targetAccount = m.app.CurrentAccount()
+		}
+		if targetAccount == "" {
+			m.dialog = m.dialog.ShowError("Select an account first.")
+			m.focus = FocusDialog
+			return nil
+		}
+
+		contactData := m.getContactDetailData(targetJID)
+		if contactData.AddedToRoster {
+			m.chat = m.chat.SetStatusMsg("Already in roster: " + targetJID)
+			return nil
+		}
+
+		name := contactData.Name
+		if name == targetJID {
+			name = ""
+		}
+
+		m.addContactAccountJID = targetAccount
+		m.dialog = m.dialog.ShowLoading("Adding to roster ("+targetAccount+"): "+targetJID+"...", dialogs.OpAddContact)
+		m.focus = FocusDialog
+		return tea.Batch(
+			m.app.DoAddContactForAccount(targetAccount, targetJID, name, ""),
+			m.app.OperationTimeout(dialogs.OpAddContact, 30),
+		)
+
+	case keybindings.ActionToggleFavorite:
+		targetJID := ""
+		// When roster is focused, always prefer the actual roster selection.
+		if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			targetJID = m.roster.SelectedJID()
+		} else if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			targetJID = m.windows.ActiveJID()
+		} else if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
+			targetJID = m.detailContactJID
+		} else if jid := m.roster.SelectedJID(); jid != "" {
+			targetJID = jid
+		}
+		if targetJID == "" {
+			m.chat = m.chat.SetStatusMsg("Select a contact to toggle favorite")
+			return nil
+		}
+
+		targetAccount := m.rosterAccountJID()
+		if targetAccount == "" {
+			m.dialog = m.dialog.ShowError("Select an account first.")
+			m.focus = FocusDialog
+			return nil
+		}
+
+		// Ensure we are not stuck in filter input state when toggling favorite.
+		if m.roster.InFilterMode() {
+			m.roster = m.roster.ExitFilterMode()
+			m.keys.SetMode(keybindings.ModeNormal)
+		}
+
+		// Show roster loading spinner while favorite is persisted.
+		m.rosterLoadingByAccount[localRosterOpKey] = true
+		m.roster = m.roster.SetLoading(true)
+		return tea.Batch(
+			rosterSpinnerTick(),
+			m.doToggleFavorite(targetAccount, targetJID),
+		)
 
 	case keybindings.ActionJoinRoom:
 		m.dialog = m.dialog.ShowJoinRoom()
@@ -744,6 +1030,33 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				m.dialog = m.dialog.ShowContactInfo(jid)
 				m.focus = FocusDialog
 			}
+		} else if m.focus == FocusChat {
+			if jid := m.windows.ActiveJID(); jid != "" {
+				contactData := m.getContactDetailData(jid)
+				m.chat = m.chat.SetContactData(&contactData)
+				m.chat = m.chat.ToggleInfoExpanded()
+			}
+		}
+
+	case keybindings.ActionShowDetails:
+		if m.focus == FocusChat {
+			if jid := m.windows.ActiveJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
+		} else if m.focus == FocusRoster || m.focus == FocusAccounts {
+			if m.roster.FocusSection() == roster.SectionAccounts || m.focus == FocusAccounts {
+				if jid := m.roster.SelectedAccountJID(); jid != "" {
+					m.viewMode = ViewModeAccountDetails
+					m.detailAccountJID = jid
+					m.detailContactJID = ""
+				}
+			} else if jid := m.roster.SelectedJID(); jid != "" {
+				m.viewMode = ViewModeContactDetails
+				m.detailContactJID = jid
+				m.detailAccountJID = ""
+			}
 		}
 
 	case keybindings.ActionShowSettings:
@@ -756,7 +1069,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 
 	case keybindings.ActionRefresh:
 		// Refresh roster from server
-		m.roster = m.roster.SetContacts(m.app.GetContacts())
+		m.refreshRosterContacts()
 		m.roster = m.roster.SetAccounts(m.getAccountDisplays())
 		m.chat = m.chat.SetStatusMsg("Refreshing roster...")
 		return m.app.RequestRosterRefresh()
@@ -764,6 +1077,11 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 	case keybindings.ActionFocusAccounts:
 		m.focus = FocusAccounts
 		m.roster = m.roster.MoveToAccounts()
+		if jid := m.roster.SelectedAccountJID(); jid != "" {
+			m.viewMode = ViewModeAccountDetails
+			m.detailAccountJID = jid
+			m.detailContactJID = ""
+		}
 
 	case keybindings.ActionToggleAccountList:
 		m.roster = m.roster.ToggleAccountList()
@@ -920,9 +1238,9 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				if jid == m.app.CurrentAccount() {
 					m.app.SwitchActiveAccount("")
 					m.windows = m.windows.SetAccountForActive("")
-					m.roster = m.roster.SetContacts(m.app.GetContacts())
-					m.viewMode = ViewModeNormal
-					m.detailAccountJID = ""
+					m.refreshRosterContacts()
+					m.resetDetailViewState()
+					m.loadActiveWindow()
 					m.chat = m.chat.SetStatusMsg("No account selected")
 					return nil
 				}
@@ -947,6 +1265,8 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 							m.viewMode = ViewModeAccountDetails
 							m.detailAccountJID = jid
 							m.chat = m.chat.SetStatusMsg("Switched to " + jid)
+							// Fetch latest roster from server for the selected account.
+							return m.app.RequestRosterRefreshForAccount(jid)
 						}
 						break
 					}
@@ -977,26 +1297,26 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 				}
 				m.chat = m.chat.SetStatusMsg("Status sharing " + stateStr + " for " + targetJID)
 				// Refresh roster to show updated status
-				m.roster = m.roster.SetContacts(m.app.GetContacts())
+				m.refreshRosterContacts()
 			}
 		}
 
 	case keybindings.ActionVerifyFingerprint:
-		// Show fingerprint verification dialog (in contact details view)
+		// Open OMEMO verification from details, roster selection, or active chat.
+		targetJID := ""
 		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
-			devices := m.app.GetContactFingerprintDetails(m.detailContactJID)
-			var dialogDevices []dialogs.OMEMODeviceInfo
-			for _, d := range devices {
-				dialogDevices = append(dialogDevices, dialogs.OMEMODeviceInfo{
-					DeviceID:    d.DeviceID,
-					Fingerprint: d.Fingerprint,
-					TrustLevel:  d.TrustLevel,
-					TrustString: d.TrustString,
-				})
-			}
-			m.dialog = m.dialog.ShowOMEMODevices(m.detailContactJID, dialogDevices)
-			m.focus = FocusDialog
+			targetJID = m.detailContactJID
+		} else if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			targetJID = m.roster.SelectedJID()
+		} else if jid := m.windows.ActiveJID(); jid != "" {
+			targetJID = jid
 		}
+
+		if targetJID == "" {
+			m.chat = m.chat.SetStatusMsg("Select a contact first to verify OMEMO devices")
+			return nil
+		}
+		m.showOMEMOVerifyDialog(targetJID)
 
 	case keybindings.ActionFocusHeader:
 		// Focus the chat header for contact actions
@@ -1107,9 +1427,10 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		if m.focus == FocusRoster {
 			if m.roster.InFilterMode() {
 				m.roster = m.roster.ExitFilterMode()
+				m.keys.SetMode(keybindings.ModeNormal)
 			} else {
 				m.roster = m.roster.EnterFilterMode()
-				m.keys.SetMode(keybindings.ModeInsert)
+				m.keys.SetMode(keybindings.ModeNormal)
 			}
 		}
 
@@ -1258,25 +1579,13 @@ func (m *Model) handleAccountEditKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 func (m *Model) handleChatHeaderKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	key := msg.String()
 
-	switch key {
-	case "h", "left":
-		// Navigate left in header actions
-		m.chat = m.chat.HeaderNavigateLeft()
-		return true, nil
-
-	case "l", "right":
-		// Navigate right in header actions
-		m.chat = m.chat.HeaderNavigateRight()
-		return true, nil
-
-	case "enter":
-		// Execute selected header action
+	executeHeaderAction := func(actionIdx int) (bool, tea.Cmd) {
 		jid := m.windows.ActiveJID()
 		if jid == "" {
 			return true, nil
 		}
 
-		switch m.chat.HeaderSelectedAction() {
+		switch actionIdx {
 		case 0: // Edit
 			// Show contact edit - for now just show details view
 			m.viewMode = ViewModeContactDetails
@@ -1296,9 +1605,7 @@ func (m *Model) handleChatHeaderKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				m.chat = m.chat.SetStatusMsg("Status sharing " + stateStr + " for " + jid)
 			}
 		case 2: // Verify fingerprint
-			fingerprints := m.app.GetContactFingerprints(jid)
-			m.dialog = m.dialog.ShowFingerprint(jid, fingerprints)
-			m.focus = FocusDialog
+			m.showOMEMOVerifyDialog(jid)
 			m.chat = m.chat.SetHeaderFocused(false)
 		case 3: // Details
 			m.viewMode = ViewModeContactDetails
@@ -1307,6 +1614,33 @@ func (m *Model) handleChatHeaderKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			m.focus = FocusChat
 		}
 		return true, nil
+	}
+
+	switch key {
+	case "h", "left":
+		// Navigate left in header actions
+		m.chat = m.chat.HeaderNavigateLeft()
+		return true, nil
+
+	case "l", "right":
+		// Navigate right in header actions
+		m.chat = m.chat.HeaderNavigateRight()
+		return true, nil
+
+	case "enter":
+		return executeHeaderAction(m.chat.HeaderSelectedAction())
+
+	case "e", "E":
+		return executeHeaderAction(0)
+
+	case "s", "S":
+		return executeHeaderAction(1)
+
+	case "v", "V":
+		return executeHeaderAction(2)
+
+	case "d", "D":
+		return executeHeaderAction(3)
 
 	case "esc", "escape":
 		// Exit header focus, return to chat
@@ -1349,6 +1683,7 @@ func (m *Model) showContextHelp() {
 				}
 				content = sb.String()
 			}
+			content += "\n\nKeys: gi inline info, gd full details"
 		}
 
 	case FocusRoster, FocusAccounts:
@@ -1357,7 +1692,7 @@ func (m *Model) showContextHelp() {
 			title = "Account Info"
 			jid := m.roster.SelectedAccountJID()
 			if jid == "" {
-				content = "No account selected.\n\nUse j/k to navigate,\ni=details  e=edit"
+				content = "No account selected.\n\nUse j/k to navigate,\nEnter/i=details  e=edit  gr=contacts"
 			} else {
 				accounts := m.app.GetAllAccountsDisplay()
 				for _, acc := range accounts {
@@ -1370,7 +1705,7 @@ func (m *Model) showContextHelp() {
 						if acc.Resource != "" {
 							content += "Resource: " + acc.Resource + "\n"
 						}
-						content += "\ni=details  e=edit  C=connect"
+						content += "\n\nEnter/i=details  e=edit  c=connect  gr=contacts"
 						break
 					}
 				}
@@ -1379,9 +1714,9 @@ func (m *Model) showContextHelp() {
 			title = "Roster Info"
 			jid := m.roster.SelectedJID()
 			if jid == "" {
-				content = "No roster entry selected.\n\nUse j/k to navigate,\ni=details  Enter=chat"
+				content = "No roster entry selected.\n\nUse j/k to navigate,\ni=details  Enter=chat  O=new window"
 			} else {
-				contacts := m.app.GetContacts()
+				contacts := m.currentRosterContacts()
 				for _, c := range contacts {
 					if c.JID == jid {
 						content = "JID: " + c.JID + "\n"
@@ -1393,7 +1728,7 @@ func (m *Model) showContextHelp() {
 							content += "Message: " + c.StatusMsg + "\n"
 						}
 						content += "Unread: " + strconv.Itoa(c.Unread)
-						content += "\n\ni=details  Enter=chat"
+						content += "\n\ni=details  Enter=chat  O=new window"
 						break
 					}
 				}
@@ -1428,6 +1763,40 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-1] + "…"
+}
+
+func bareJID(j string) string {
+	if idx := strings.Index(j, "/"); idx > 0 {
+		return j[:idx]
+	}
+	return j
+}
+
+func (m *Model) resetDetailViewState() {
+	m.viewMode = ViewModeNormal
+	m.detailAccountJID = ""
+	m.detailContactJID = ""
+}
+
+func (m *Model) showOMEMOVerifyDialog(jid string) {
+	devices := m.app.GetContactFingerprintDetails(jid)
+	if len(devices) == 0 {
+		m.dialog = m.dialog.ShowError("No OMEMO devices found for " + jid + ". Exchange OMEMO messages first.")
+		m.focus = FocusDialog
+		return
+	}
+
+	dialogDevices := make([]dialogs.OMEMODeviceInfo, 0, len(devices))
+	for _, d := range devices {
+		dialogDevices = append(dialogDevices, dialogs.OMEMODeviceInfo{
+			DeviceID:    d.DeviceID,
+			Fingerprint: d.Fingerprint,
+			TrustLevel:  d.TrustLevel,
+			TrustString: d.TrustString,
+		})
+	}
+	m.dialog = m.dialog.ShowOMEMODevices(jid, dialogDevices)
+	m.focus = FocusDialog
 }
 
 // updateFocusedComponent sends the key message to the focused component
@@ -1486,10 +1855,45 @@ func (m *Model) updateFocusedComponent(msg tea.KeyMsg) []tea.Cmd {
 func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 	switch event.Type {
 	case app.EventRosterUpdate:
-		contacts := m.app.GetContacts()
+		contacts := m.currentRosterContacts()
 		m.roster = m.roster.SetContacts(contacts)
+		if jid := m.windows.ActiveJID(); jid != "" {
+			contactData := m.getContactDetailData(jid)
+			m.chat = m.chat.SetContactData(&contactData)
+		}
 
 	case app.EventMessage:
+		activeJID := bareJID(m.windows.ActiveJID())
+		activeAccount := m.windows.GetActiveAccountJID()
+		if activeAccount == "" {
+			activeAccount = m.app.CurrentAccount()
+		}
+
+		applyChatEvent := func(chatMsg chat.Message) {
+			if chatMsg.CorrectedID != "" {
+				m.chat = m.chat.CorrectMessage(chatMsg.CorrectedID, chatMsg.Body)
+			} else if len(chatMsg.Reactions) > 0 {
+				for from, reaction := range chatMsg.Reactions {
+					m.chat = m.chat.AddReaction(chatMsg.ID, from, reaction)
+				}
+			} else {
+				m.chat = m.chat.AddMessage(chatMsg)
+			}
+		}
+
+		shouldApplyToActive := func(peerJID, msgAccount string) bool {
+			if peerJID == "" || activeJID == "" || peerJID != activeJID {
+				return false
+			}
+			if msgAccount == "" {
+				return true
+			}
+			if activeAccount == "" {
+				return false
+			}
+			return msgAccount == activeAccount
+		}
+
 		switch msg := event.Data.(type) {
 		case app.ChatMessage:
 			chatMsg := chat.Message{
@@ -1505,26 +1909,39 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 				CorrectedID: msg.CorrectedID,
 				Reactions:   msg.Reactions,
 			}
-			if chatMsg.CorrectedID != "" {
-				m.chat = m.chat.CorrectMessage(chatMsg.CorrectedID, chatMsg.Body)
-			} else if len(chatMsg.Reactions) > 0 {
-				for from, reaction := range chatMsg.Reactions {
-					m.chat = m.chat.AddReaction(chatMsg.ID, from, reaction)
+			peerJID := bareJID(chatMsg.From)
+			if chatMsg.Outgoing {
+				peerJID = bareJID(chatMsg.To)
+			}
+			if peerJID == "" {
+				peerJID = activeJID
+			}
+
+			if shouldApplyToActive(peerJID, msg.AccountJID) {
+				applyChatEvent(chatMsg)
+				if msg.AccountJID != "" {
+					m.app.ClearContactUnread(msg.AccountJID, peerJID)
+					m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(msg.AccountJID))
 				}
-			} else {
-				m.chat = m.chat.AddMessage(chatMsg)
+				m.windows = m.windows.ClearUnread(m.windows.ActiveNum())
+			} else if !chatMsg.Outgoing && peerJID != "" {
+				m.windows = m.windows.OpenOrIncrementUnreadForAccount(peerJID, msg.AccountJID)
 			}
 		case chat.Message:
-			if msg.CorrectedID != "" {
-				m.chat = m.chat.CorrectMessage(msg.CorrectedID, msg.Body)
-			} else if len(msg.Reactions) > 0 {
-				for from, reaction := range msg.Reactions {
-					m.chat = m.chat.AddReaction(msg.ID, from, reaction)
-				}
-			} else {
-				m.chat = m.chat.AddMessage(msg)
+			peerJID := bareJID(msg.From)
+			if msg.Outgoing {
+				peerJID = bareJID(msg.To)
+			}
+
+			if activeJID != "" && peerJID == activeJID {
+				applyChatEvent(msg)
+				m.windows = m.windows.ClearUnread(m.windows.ActiveNum())
+			} else if !msg.Outgoing && peerJID != "" {
+				m.windows = m.windows.OpenOrIncrementUnreadForAccount(peerJID, "")
 			}
 		}
+		// Keep contact unread indicators live in the roster.
+		m.refreshRosterContacts()
 
 	case app.EventPresence:
 		if presence, ok := event.Data.(app.PresenceUpdate); ok {
@@ -1533,10 +1950,29 @@ func (m *Model) handleAppEvent(event app.EventMsg) tea.Cmd {
 			if presence.StatusMsg != "" {
 				m.roster = m.roster.UpdatePresenceMessage(presence.JID, presence.StatusMsg)
 			}
+			if jid := m.windows.ActiveJID(); jid != "" && jid == presence.JID {
+				contactData := m.getContactDetailData(jid)
+				m.chat = m.chat.SetContactData(&contactData)
+			}
 		}
 		// Check if we're connecting
 		if m.app.Status() == "connecting" {
 			m.chat = m.chat.SetStatusMsg("Connecting to " + m.app.CurrentAccount() + "...")
+		}
+
+	case app.EventRosterLoading:
+		if update, ok := event.Data.(app.RosterLoadingUpdate); ok {
+			if update.Loading {
+				m.rosterLoadingByAccount[update.AccountJID] = true
+			} else {
+				delete(m.rosterLoadingByAccount, update.AccountJID)
+			}
+		}
+		anyLoading := len(m.rosterLoadingByAccount) > 0
+		wasLoading := m.roster.IsLoading()
+		m.roster = m.roster.SetLoading(anyLoading)
+		if anyLoading && !wasLoading {
+			return rosterSpinnerTick()
 		}
 
 	case app.EventConnected:
@@ -1573,31 +2009,97 @@ func (m *Model) executeCommand(cmd string, args []string) tea.Cmd {
 	return m.app.ExecuteCommand(cmd, args)
 }
 
+func (m *Model) doToggleFavorite(accountJID, contactJID string) tea.Cmd {
+	return func() tea.Msg {
+		newState, err := m.app.ToggleContactFavoriteForAccount(accountJID, contactJID)
+		if err != nil {
+			return favoriteToggleResultMsg{
+				AccountJID: accountJID,
+				JID:        contactJID,
+				Err:        err.Error(),
+			}
+		}
+		return favoriteToggleResultMsg{
+			AccountJID: accountJID,
+			JID:        contactJID,
+			Favorite:   newState,
+		}
+	}
+}
+
 // openChat opens a chat window for the given JID
 func (m *Model) openChat(jid string) {
+	accountJID := m.windows.GetActiveAccountJID()
+	if accountJID == "" {
+		accountJID = m.app.CurrentAccount()
+	}
+
 	var ok bool
-	m.windows, ok = m.windows.OpenChatResult(jid)
+	m.windows, ok = m.windows.ReplaceActiveChatWithAccountResult(jid, accountJID)
+	if !ok {
+		m.dialog = m.dialog.ShowError("Cannot open chat in current window.")
+		m.focus = FocusDialog
+		return
+	}
+	m.loadActiveWindow()
+	m.chat = m.chat.SetInfoExpanded(false)
+}
+
+// openChatNewWindow opens a chat in a separate window (or switches to existing matching one).
+func (m *Model) openChatNewWindow(jid string) {
+	accountJID := m.windows.GetActiveAccountJID()
+	if accountJID == "" {
+		accountJID = m.app.CurrentAccount()
+	}
+
+	var ok bool
+	m.windows, ok = m.windows.OpenChatWithAccountResult(jid, accountJID)
 	if !ok {
 		m.dialog = m.dialog.ShowError("Cannot open more windows (max 20). Close a window first.")
 		m.focus = FocusDialog
 		return
 	}
-	history := m.app.GetChatHistory(jid)
-	m.chat = m.chat.SetJID(jid)
-	m.chat = m.chat.SetHistory(history)
+	m.loadActiveWindow()
+	m.chat = m.chat.SetInfoExpanded(false)
 }
 
 // loadActiveWindow loads the content for the active window
 func (m *Model) loadActiveWindow() {
+	accountJID := m.windows.GetActiveAccountJID()
+	if accountJID != "" && accountJID != m.app.CurrentAccount() {
+		m.app.SwitchActiveAccount(accountJID)
+		m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(accountJID))
+	}
+
+	// When no account is selected for the active context, hide chat content.
+	if m.rosterAccountJID() == "" {
+		m.chat = m.chat.SetJID("")
+		m.chat = m.chat.SetHistory(nil)
+		m.chat = m.chat.SetContactData(nil)
+		m.chat = m.chat.SetInfoExpanded(false)
+		m.refreshRosterContacts()
+		return
+	}
+
 	jid := m.windows.ActiveJID()
 	if jid != "" {
+		m.windows = m.windows.ClearUnread(m.windows.ActiveNum())
+		if accountJID != "" {
+			m.app.ClearContactUnread(accountJID, jid)
+			m.app.TouchContactInteractionForAccount(accountJID, jid, time.Now())
+			m.refreshRosterContacts()
+		}
 		history := m.app.GetChatHistory(jid)
+		contactData := m.getContactDetailData(jid)
 		m.chat = m.chat.SetJID(jid)
 		m.chat = m.chat.SetHistory(history)
+		m.chat = m.chat.SetContactData(&contactData)
 	} else {
 		// Console window - clear chat
 		m.chat = m.chat.SetJID("")
 		m.chat = m.chat.SetHistory(nil)
+		m.chat = m.chat.SetContactData(nil)
+		m.chat = m.chat.SetInfoExpanded(false)
 	}
 }
 
@@ -1606,8 +2108,32 @@ func (m *Model) updateComponentSizes() {
 	rosterWidth := m.app.Config().UI.RosterWidth
 	if !m.showRoster {
 		rosterWidth = 0
+	} else {
+		// Scale sidebar a bit with terminal width so it doesn't feel too narrow
+		// on larger terminals, while preserving a comfortable chat area.
+		proportionalWidth := m.width / 5 // ~20% of terminal width
+		if proportionalWidth > rosterWidth {
+			rosterWidth = proportionalWidth
+		}
+
+		minChatWidth := 60
+		if m.width-rosterWidth < minChatWidth {
+			rosterWidth = m.width - minChatWidth
+		}
+		if rosterWidth < 24 {
+			rosterWidth = 24
+		}
+		if rosterWidth > m.width-20 {
+			rosterWidth = m.width - 20
+		}
+		if rosterWidth < 0 {
+			rosterWidth = 0
+		}
 	}
 	chatWidth := m.width - rosterWidth
+	if chatWidth < 20 {
+		chatWidth = 20
+	}
 
 	statusHeight := 1
 	cmdHeight := 1
@@ -1619,11 +2145,32 @@ func (m *Model) updateComponentSizes() {
 	m.commandline = m.commandline.SetWidth(m.width)
 }
 
+func (m *Model) rosterAccountJID() string {
+	accountJID := m.windows.GetActiveAccountJID()
+	if accountJID != "" {
+		return accountJID
+	}
+	return m.app.CurrentAccount()
+}
+
+func (m *Model) currentRosterContacts() []roster.Roster {
+	accountJID := m.rosterAccountJID()
+	if accountJID == "" {
+		return nil
+	}
+	return m.app.GetContactsForAccount(accountJID)
+}
+
+func (m *Model) refreshRosterContacts() {
+	m.roster = m.roster.SetContacts(m.currentRosterContacts())
+}
+
 // getAccountDisplays converts all accounts to roster display format
 func (m Model) getAccountDisplays() []roster.AccountDisplay {
 	accounts := m.app.GetAllAccountsDisplay()
 	displays := make([]roster.AccountDisplay, len(accounts))
 	for i, acc := range accounts {
+		_, syncing := m.rosterLoadingByAccount[acc.JID]
 		displays[i] = roster.AccountDisplay{
 			JID:         acc.JID,
 			Status:      acc.Status,
@@ -1635,6 +2182,7 @@ func (m Model) getAccountDisplays() []roster.AccountDisplay {
 			OMEMO:       acc.OMEMO,
 			Session:     acc.Session,
 			AutoConnect: acc.AutoConnect,
+			RosterSync:  syncing,
 		}
 	}
 	return displays
@@ -1927,17 +2475,27 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 		}
 
 	case dialogs.DialogAddContact:
+		if !result.Confirmed {
+			m.addContactAccountJID = ""
+		}
 		if result.Confirmed {
 			jid := result.Values["jid"]
 			name := result.Values["name"]
 			group := result.Values["group"]
+			targetAccount := m.addContactAccountJID
+			if targetAccount == "" {
+				targetAccount = m.windows.GetActiveAccountJID()
+			}
+			if targetAccount == "" {
+				targetAccount = m.app.CurrentAccount()
+			}
 			if jid != "" {
 				// Show loading dialog with spinner
-				m.dialog = m.dialog.ShowLoading("Adding to roster: "+jid+"...", dialogs.OpAddContact)
+				m.dialog = m.dialog.ShowLoading("Adding to roster ("+targetAccount+"): "+jid+"...", dialogs.OpAddContact)
 				m.focus = FocusDialog
 				// Return both the add contact command and spinner tick
 				return tea.Batch(
-					m.app.DoAddContact(jid, name, group),
+					m.app.DoAddContactForAccount(targetAccount, jid, name, group),
 					dialogs.SpinnerTick(),
 					m.app.OperationTimeout(dialogs.OpAddContact, 30), // 30 second timeout
 				)
@@ -2289,6 +2847,8 @@ func (m *Model) handleDialogResult(result dialogs.DialogResult) tea.Cmd {
 // getAccountDetailData builds account detail data for the detail view
 func (m *Model) getAccountDetailData(jid string) chat.AccountDetailData {
 	accounts := m.app.GetAllAccountsDisplay()
+	_, syncing := m.rosterLoadingByAccount[jid]
+	frame := m.roster.LoadingFrame()
 	for _, acc := range accounts {
 		if acc.JID == jid {
 			// Get OMEMO fingerprint if enabled
@@ -2297,6 +2857,8 @@ func (m *Model) getAccountDetailData(jid string) chat.AccountDetailData {
 			return chat.AccountDetailData{
 				JID:              acc.JID,
 				Status:           acc.Status,
+				RosterSync:       syncing,
+				RosterSyncFrame:  frame,
 				Server:           acc.Server,
 				Port:             acc.Port,
 				Resource:         acc.Resource,
@@ -2311,12 +2873,12 @@ func (m *Model) getAccountDetailData(jid string) chat.AccountDetailData {
 		}
 	}
 	// Return empty data if not found
-	return chat.AccountDetailData{JID: jid, Status: "unknown"}
+	return chat.AccountDetailData{JID: jid, Status: "unknown", RosterSync: syncing, RosterSyncFrame: frame}
 }
 
 // getContactDetailData builds contact detail data for the detail view
 func (m *Model) getContactDetailData(jid string) chat.ContactDetailData {
-	contacts := m.app.GetContacts()
+	contacts := m.currentRosterContacts()
 	for _, c := range contacts {
 		if c.JID == jid {
 			return chat.ContactDetailData{
@@ -2325,6 +2887,9 @@ func (m *Model) getContactDetailData(jid string) chat.ContactDetailData {
 				Status:        c.Status,
 				StatusMsg:     c.StatusMsg,
 				Groups:        c.Groups,
+				Subscription:  c.Subscription,
+				AddedToRoster: c.AddedToRoster,
+				Favorite:      c.Favorite,
 				StatusSharing: m.app.IsStatusSharingEnabled(jid),
 				OMEMOEnabled:  true, // TODO: Get from contact settings
 				// Fingerprints would be populated from OMEMO storage
@@ -2332,7 +2897,7 @@ func (m *Model) getContactDetailData(jid string) chat.ContactDetailData {
 		}
 	}
 	// Return empty data if not found
-	return chat.ContactDetailData{JID: jid, Status: "offline"}
+	return chat.ContactDetailData{JID: jid, Status: "offline", AddedToRoster: false}
 }
 
 // Dangerous file extensions that may execute code
@@ -2352,6 +2917,32 @@ func isDangerousFileType(url string) bool {
 		}
 	}
 	return false
+}
+
+func validateUploadPutURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid upload URL: %w", err)
+	}
+	if parsed.Host == "" || parsed.Scheme == "" {
+		return "", fmt.Errorf("invalid upload URL: missing host or scheme")
+	}
+	if strings.ToLower(parsed.Scheme) != "https" {
+		return "", fmt.Errorf("insecure upload URL scheme: %s", parsed.Scheme)
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".local") {
+		return "", fmt.Errorf("refusing local upload host: %s", host)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return "", fmt.Errorf("refusing private/local upload host: %s", host)
+		}
+	}
+
+	return parsed.String(), nil
 }
 
 func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
@@ -2387,7 +2978,15 @@ func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
 			return nil
 		}
 
-		req, err := http.NewRequest("PUT", slot.PutURL, file)
+		putURL, err := validateUploadPutURL(slot.PutURL)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Unsafe upload URL: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+
+		// #nosec G704 -- URL comes from server slot but is strictly validated by validateUploadPutURL.
+		req, err := http.NewRequest("PUT", putURL, file)
 		if err != nil {
 			m.dialog = m.dialog.ShowError("Failed to create upload request: " + err.Error())
 			m.focus = FocusDialog
@@ -2400,6 +2999,7 @@ func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
 		}
 
 		client := &http.Client{Timeout: 5 * time.Minute}
+		// #nosec G704 -- Request target is validated by validateUploadPutURL before use.
 		resp, err := client.Do(req)
 		if err != nil {
 			m.dialog = m.dialog.ShowError("Upload failed: " + err.Error())

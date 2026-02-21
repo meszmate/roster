@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -84,6 +86,25 @@ func (d *DB) migrate() error {
 			last_read INTEGER,
 			PRIMARY KEY (account, jid)
 		)`,
+		`CREATE TABLE IF NOT EXISTS roster_cache (
+			account TEXT NOT NULL,
+			jid TEXT NOT NULL,
+			name TEXT,
+			groups_json TEXT,
+			subscription TEXT,
+			added_to_roster INTEGER NOT NULL DEFAULT 1,
+			last_updated INTEGER NOT NULL,
+			PRIMARY KEY (account, jid)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_roster_cache_account ON roster_cache(account)`,
+		`CREATE TABLE IF NOT EXISTS mam_sync (
+			account TEXT NOT NULL,
+			jid TEXT NOT NULL,
+			last_stanza_id TEXT,
+			last_timestamp INTEGER,
+			last_synced INTEGER NOT NULL,
+			PRIMARY KEY (account, jid)
+		)`,
 
 		`CREATE TABLE IF NOT EXISTS contact_presence_settings (
 			account TEXT NOT NULL,
@@ -158,6 +179,21 @@ func (d *DB) migrate() error {
 	for _, migration := range migrations {
 		if _, err := d.db.Exec(migration); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
+		}
+	}
+
+	// Backward-compatible migration for older DBs that predate stanza_id.
+	if _, err := d.db.Exec(`ALTER TABLE messages ADD COLUMN stanza_id TEXT`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("failed to ensure stanza_id column: %w", err)
+		}
+	}
+	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_stanza_id ON messages(stanza_id)`); err != nil {
+		return fmt.Errorf("failed to ensure stanza_id index: %w", err)
+	}
+	if _, err := d.db.Exec(`ALTER TABLE roster_cache ADD COLUMN added_to_roster INTEGER NOT NULL DEFAULT 1`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("failed to ensure added_to_roster column: %w", err)
 		}
 	}
 
@@ -269,6 +305,33 @@ func (d *DB) MarkRead(account, jid string) error {
 		ON CONFLICT(account, jid) DO UPDATE SET unread = 0, last_read = excluded.last_read
 	`, account, jid, now)
 	return err
+}
+
+type ChatStateEntry struct {
+	JID    string
+	Unread int
+}
+
+func (d *DB) GetChatStates(account string) ([]ChatStateEntry, error) {
+	rows, err := d.db.Query(`
+		SELECT jid, unread
+		FROM chat_state
+		WHERE account = ?
+	`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ChatStateEntry
+	for rows.Next() {
+		var entry ChatStateEntry
+		if err := rows.Scan(&entry.JID, &entry.Unread); err != nil {
+			return nil, err
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }
 
 type Session struct {
@@ -608,7 +671,7 @@ func (d *DB) GetContactsWithStatusSharing(account string) ([]string, error) {
 func (d *DB) SaveMessageWithStanzaID(account, jid, id, stanzaID, body, msgType string, timestamp time.Time, outgoing, encrypted bool) error {
 	_, err := d.db.Exec(`
 		INSERT OR IGNORE INTO messages (id, stanza_id, account, jid, body, timestamp, outgoing, encrypted, type)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, stanzaID, account, jid, body, timestamp.Unix(), outgoing, encrypted, msgType)
 	return err
 }
@@ -651,10 +714,104 @@ func (d *DB) DeleteMAMSync(account, jid string) error {
 }
 
 func (d *DB) MessageExists(stanzaID string) (bool, error) {
-	var exists bool
-	err := d.db.QueryRow("SELECT 1 FROM messages WHERE stanza_id = ?", stanzaID).Scan(&exists)
+	var one int
+	err := d.db.QueryRow("SELECT 1 FROM messages WHERE stanza_id = ?", stanzaID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
-	return exists, err
+	if err != nil {
+		return false, err
+	}
+	return one == 1, nil
+}
+
+type RosterEntry struct {
+	JID           string
+	Name          string
+	Groups        []string
+	Subscription  string
+	AddedToRoster bool
+}
+
+func (d *DB) SaveRoster(account string, entries []RosterEntry) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Ignore rollback error after successful commit.
+		_ = tx.Rollback()
+	}()
+
+	if _, err := tx.Exec("DELETE FROM roster_cache WHERE account = ?", account); err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		groupsJSON := "[]"
+		if len(entry.Groups) > 0 {
+			encoded, err := json.Marshal(entry.Groups)
+			if err != nil {
+				return err
+			}
+			groupsJSON = string(encoded)
+		}
+
+		_, err := tx.Exec(`
+			INSERT INTO roster_cache (account, jid, name, groups_json, subscription, added_to_roster, last_updated)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, account, entry.JID, entry.Name, groupsJSON, entry.Subscription, boolToInt(entry.AddedToRoster), time.Now().Unix())
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) GetRoster(account string) ([]RosterEntry, error) {
+	rows, err := d.db.Query(`
+		SELECT jid, name, groups_json, subscription, added_to_roster
+		FROM roster_cache
+		WHERE account = ?
+		ORDER BY COALESCE(name, jid), jid
+	`, account)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []RosterEntry
+	for rows.Next() {
+		var entry RosterEntry
+		var groupsJSON sql.NullString
+		var name, subscription sql.NullString
+		var addedToRoster int
+
+		if err := rows.Scan(&entry.JID, &name, &groupsJSON, &subscription, &addedToRoster); err != nil {
+			return nil, err
+		}
+
+		if name.Valid {
+			entry.Name = name.String
+		}
+		if subscription.Valid {
+			entry.Subscription = subscription.String
+		}
+		if groupsJSON.Valid && groupsJSON.String != "" {
+			_ = json.Unmarshal([]byte(groupsJSON.String), &entry.Groups)
+		}
+		entry.AddedToRoster = addedToRoster != 0
+
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

@@ -56,6 +56,20 @@ func (m Model) OpenChatWithAccount(jid, accountJID string) Model {
 	return m
 }
 
+// ReplaceActiveChatWithAccountResult always reuses the active window for a chat.
+func (m Model) ReplaceActiveChatWithAccountResult(jid, accountJID string) (Model, bool) {
+	if m.active < 0 || m.active >= len(m.windows) {
+		return m.OpenChatWithAccountResult(jid, accountJID)
+	}
+
+	m.windows[m.active].Type = WindowChat
+	m.windows[m.active].JID = jid
+	m.windows[m.active].Title = jid
+	m.windows[m.active].Unread = 0
+	m.windows[m.active].AccountJID = accountJID
+	return m, true
+}
+
 // OpenChatResult opens a chat window and returns success/failure
 func (m Model) OpenChatResult(jid string) (Model, bool) {
 	return m.OpenChatWithAccountResult(jid, "")
@@ -65,9 +79,31 @@ func (m Model) OpenChatResult(jid string) (Model, bool) {
 func (m Model) OpenChatWithAccountResult(jid, accountJID string) (Model, bool) {
 	// Check if window already exists
 	for i, w := range m.windows {
-		if w.JID == jid {
-			m.active = i
-			return m, true
+		if w.JID != jid {
+			continue
+		}
+		if accountJID != "" && w.AccountJID != accountJID {
+			continue
+		}
+		if accountJID == "" && w.AccountJID != "" {
+			continue
+		}
+		if w.AccountJID == "" && accountJID != "" {
+			m.windows[i].AccountJID = accountJID
+		}
+		m.active = i
+		return m, true
+	}
+
+	// Backward compatibility: claim a legacy unbound window if no exact
+	// account-bound window exists yet.
+	if accountJID != "" {
+		for i, w := range m.windows {
+			if w.JID == jid && w.AccountJID == "" {
+				m.windows[i].AccountJID = accountJID
+				m.active = i
+				return m, true
+			}
 		}
 	}
 
@@ -87,6 +123,43 @@ func (m Model) OpenChatWithAccountResult(jid, accountJID string) (Model, bool) {
 	m.windows = append(m.windows, window)
 	m.active = len(m.windows) - 1
 	return m, true
+}
+
+// OpenOrIncrementUnreadForAccount increments unread on an existing chat window
+// or creates a background window with unread=1 if it doesn't exist yet.
+func (m Model) OpenOrIncrementUnreadForAccount(jid, accountJID string) Model {
+	for i, w := range m.windows {
+		if w.JID != jid {
+			continue
+		}
+		if accountJID != "" && w.AccountJID != accountJID {
+			continue
+		}
+		if accountJID == "" && w.AccountJID != "" {
+			continue
+		}
+		if i != m.active {
+			m.windows[i].Unread++
+		}
+		if m.windows[i].AccountJID == "" && accountJID != "" {
+			m.windows[i].AccountJID = accountJID
+		}
+		return m
+	}
+
+	if len(m.windows) >= m.maxWindows {
+		return m
+	}
+
+	m.windows = append(m.windows, Window{
+		ID:         len(m.windows),
+		Type:       WindowChat,
+		JID:        jid,
+		Title:      jid,
+		Unread:     1,
+		AccountJID: accountJID,
+	})
+	return m
 }
 
 // OpenMUC opens a new MUC window
