@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.0.0
 	github.com/hashicorp/go-plugin v1.6.2
 	github.com/mattn/go-sqlite3 v1.14.24
-	github.com/meszmate/xmpp-go v0.0.0-20260217134457-64854c8d2283
+	github.com/meszmate/xmpp-go v0.0.0-20260221040245-0387605848dc
 	github.com/meszmate/xmpp-go/crypto/omemo v0.0.0-20260210123917-3d0374d2558b
 	google.golang.org/grpc v1.68.0
 )
@@ -40,5 +40,3 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/protobuf v1.35.2 // indirect
 )
-
-replace github.com/meszmate/xmpp-go => /Users/meszmate/xmpp-go
