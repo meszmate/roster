@@ -2,7 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -627,6 +629,8 @@ func (m Model) View() string {
 }
 
 // handleAction processes keybinding actions
+//
+//nolint:gocyclo // Central action dispatcher for all keybindings in one place by design.
 func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd {
 	switch action {
 	case keybindings.ActionQuit:
@@ -2915,6 +2919,32 @@ func isDangerousFileType(url string) bool {
 	return false
 }
 
+func validateUploadPutURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid upload URL: %w", err)
+	}
+	if parsed.Host == "" || parsed.Scheme == "" {
+		return "", fmt.Errorf("invalid upload URL: missing host or scheme")
+	}
+	if strings.ToLower(parsed.Scheme) != "https" {
+		return "", fmt.Errorf("insecure upload URL scheme: %s", parsed.Scheme)
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".local") {
+		return "", fmt.Errorf("refusing local upload host: %s", host)
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return "", fmt.Errorf("refusing private/local upload host: %s", host)
+		}
+	}
+
+	return parsed.String(), nil
+}
+
 func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
 	return func() tea.Msg {
 		fileInfo, err := os.Stat(filepath)
@@ -2948,7 +2978,15 @@ func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
 			return nil
 		}
 
-		req, err := http.NewRequest("PUT", slot.PutURL, file)
+		putURL, err := validateUploadPutURL(slot.PutURL)
+		if err != nil {
+			m.dialog = m.dialog.ShowError("Unsafe upload URL: " + err.Error())
+			m.focus = FocusDialog
+			return nil
+		}
+
+		// #nosec G704 -- URL comes from server slot but is strictly validated by validateUploadPutURL.
+		req, err := http.NewRequest("PUT", putURL, file)
 		if err != nil {
 			m.dialog = m.dialog.ShowError("Failed to create upload request: " + err.Error())
 			m.focus = FocusDialog
@@ -2961,6 +2999,7 @@ func (m *Model) uploadFile(jid, filepath string) tea.Cmd {
 		}
 
 		client := &http.Client{Timeout: 5 * time.Minute}
+		// #nosec G704 -- Request target is validated by validateUploadPutURL before use.
 		resp, err := client.Do(req)
 		if err != nil {
 			m.dialog = m.dialog.ShowError("Upload failed: " + err.Error())

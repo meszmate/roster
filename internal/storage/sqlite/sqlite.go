@@ -738,7 +738,10 @@ func (d *DB) SaveRoster(account string, entries []RosterEntry) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() {
+		// Ignore rollback error after successful commit.
+		_ = tx.Rollback()
+	}()
 
 	if _, err := tx.Exec("DELETE FROM roster_cache WHERE account = ?", account); err != nil {
 		return err

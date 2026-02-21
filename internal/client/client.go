@@ -781,7 +781,9 @@ func (c *Client) sendIQAndWaitDirect(iq *stanza.IQ, timeout time.Duration) (*sta
 	if connGetter, ok := c.session.Transport().(interface{ Conn() net.Conn }); ok {
 		conn := connGetter.Conn()
 		_ = conn.SetReadDeadline(time.Now().Add(timeout))
-		defer conn.SetReadDeadline(time.Time{})
+		defer func() {
+			_ = conn.SetReadDeadline(time.Time{})
+		}()
 	}
 
 	for {
