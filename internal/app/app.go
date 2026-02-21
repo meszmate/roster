@@ -19,8 +19,8 @@ import (
 	"github.com/meszmate/roster/internal/ui/components/chat"
 	"github.com/meszmate/roster/internal/ui/components/dialogs"
 	"github.com/meszmate/roster/internal/ui/components/roster"
-	"github.com/meszmate/roster/internal/xmpp/register"
 	"github.com/meszmate/xmpp-go/jid"
+	"github.com/meszmate/xmpp-go/plugins/register"
 )
 
 // EventType represents the type of event
