@@ -56,32 +56,10 @@ func (m Model) OpenChatWithAccount(jid, accountJID string) Model {
 	return m
 }
 
-// ReplaceActiveChatWithAccountResult reuses the active window for a chat.
-// If the active window is console, it falls back to regular open behavior.
+// ReplaceActiveChatWithAccountResult always reuses the active window for a chat.
 func (m Model) ReplaceActiveChatWithAccountResult(jid, accountJID string) (Model, bool) {
 	if m.active < 0 || m.active >= len(m.windows) {
 		return m.OpenChatWithAccountResult(jid, accountJID)
-	}
-
-	if m.windows[m.active].Type == WindowConsole {
-		return m.OpenChatWithAccountResult(jid, accountJID)
-	}
-
-	for i, w := range m.windows {
-		if i == m.active {
-			continue
-		}
-		if w.JID != jid {
-			continue
-		}
-		if accountJID != "" && w.AccountJID != accountJID {
-			continue
-		}
-		if accountJID == "" && w.AccountJID != "" {
-			continue
-		}
-		m.active = i
-		return m, true
 	}
 
 	m.windows[m.active].Type = WindowChat

@@ -124,6 +124,7 @@ const (
 	// Roster
 	ActionAddContact
 	ActionAddSelectedToRoster
+	ActionToggleFavorite
 	ActionRemoveContact
 	ActionRenameContact
 	ActionShowInfo
@@ -307,11 +308,14 @@ func (m *Manager) setupDefaultBindings() {
 		"'":       ActionJumpToMark,
 
 		// Roster actions (avoiding ctrl+a for tmux users)
-		"ga": ActionAddContact,    // 'g' prefix + 'a' for add
-		"gx": ActionRemoveContact, // 'g' prefix + 'x' for remove
-		"gR": ActionRenameContact, // 'g' prefix + 'R' for rename (capital)
-		"gi": ActionShowInfo,      // 'g' prefix + 'i' for info
-		"gd": ActionShowDetails,   // 'g' prefix + 'd' for full details
+		"ga": ActionAddContact,     // 'g' prefix + 'a' for add
+		"gx": ActionRemoveContact,  // 'g' prefix + 'x' for remove
+		"gR": ActionRenameContact,  // 'g' prefix + 'R' for rename (capital)
+		"gi": ActionShowInfo,       // 'g' prefix + 'i' for info
+		"gd": ActionShowDetails,    // 'g' prefix + 'd' for full details
+		"f":  ActionToggleFavorite, // Toggle favorite on selected contact
+		"F":  ActionToggleFavorite, // Toggle favorite on selected contact
+		"gF": ActionToggleFavorite, // Alternative favorite toggle
 
 		// MUC (avoiding ctrl conflicts for tmux)
 		"gj": ActionJoinRoom,         // 'g' prefix + 'j' for join
@@ -321,7 +325,7 @@ func (m *Manager) setupDefaultBindings() {
 		"cc": ActionCorrectMessage,   // 'c' prefix + 'c' for correct last message
 		"cr": ActionAddReaction,      // 'c' prefix + 'r' for add reaction
 		"cf": ActionUploadFile,       // 'c' prefix + 'f' for upload file
-		"f":  ActionSearchContacts,   // 'f' for filter/search contacts
+		"gf": ActionSearchContacts,   // 'g' prefix + 'f' for filter/search contacts
 		"ge": ActionExportAccounts,   // 'g' prefix + 'e' for export accounts
 		"gI": ActionImportAccounts,   // 'g' prefix + 'I' (capital) for import accounts
 
@@ -651,6 +655,7 @@ func ActionName(action Action) string {
 		ActionCloseChat:           "close chat",
 		ActionAddContact:          "add contact",
 		ActionAddSelectedToRoster: "add selected to roster",
+		ActionToggleFavorite:      "toggle favorite",
 		ActionSendMessage:         "send message",
 		ActionQuit:                "quit",
 	}

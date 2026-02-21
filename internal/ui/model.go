@@ -101,6 +101,15 @@ func rosterSpinnerTick() tea.Cmd {
 	})
 }
 
+const localRosterOpKey = "__local__favorite_toggle__"
+
+type favoriteToggleResultMsg struct {
+	AccountJID string
+	JID        string
+	Favorite   bool
+	Err        string
+}
+
 // NewModel creates a new root model
 func NewModel(application *app.App) Model {
 	cfg := application.Config()
@@ -118,7 +127,7 @@ func NewModel(application *app.App) Model {
 		showRoster:             true,
 		keys:                   keysManager,
 		themes:                 themeManager,
-		roster:                 roster.New(themeManager.Styles()).SetContacts(application.GetContacts()),
+		roster:                 roster.New(themeManager.Styles()).SetContacts(nil),
 		chat:                   chat.New(themeManager.Styles()),
 		statusbar:              statusbar.New(themeManager.Styles()),
 		commandline:            commandline.New(themeManager.Styles()),
@@ -190,6 +199,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if handled {
 				return m, cmd
 			}
+		}
+
+		// Always treat lowercase 'f' in normal mode as favorite toggle.
+		// This avoids accidental filter-mode entry due pending multi-key prefixes.
+		if m.keys.Mode() == keybindings.ModeNormal &&
+			msg.Type == tea.KeyRunes &&
+			len(msg.Runes) == 1 &&
+			msg.Runes[0] == 'f' &&
+			m.focus != FocusCommandLine &&
+			!m.dialog.Active() {
+			m.keys.SetMode(m.keys.Mode()) // clear pending multi-key state (e.g. stale "g")
+			cmd := m.handleAction(keybindings.ActionToggleFavorite, msg)
+			return m, cmd
+		}
+
+		// While roster filter mode is active, treat keystrokes as filter input
+		// instead of global keybindings.
+		if m.focus == FocusRoster && m.roster.InFilterMode() {
+			cmds = append(cmds, m.updateFocusedComponent(msg)...)
+			return m, tea.Batch(cmds...)
 		}
 
 		// Process key through keybinding manager
@@ -294,6 +323,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.roster.IsLoading() {
 			m.roster = m.roster.AdvanceLoadingSpinner()
 			cmds = append(cmds, rosterSpinnerTick())
+		}
+
+	case favoriteToggleResultMsg:
+		delete(m.rosterLoadingByAccount, localRosterOpKey)
+		anyLoading := len(m.rosterLoadingByAccount) > 0
+		m.roster = m.roster.SetLoading(anyLoading)
+		if anyLoading {
+			cmds = append(cmds, rosterSpinnerTick())
+		}
+
+		if msg.Err != "" {
+			m.dialog = m.dialog.ShowError("Failed to toggle favorite: " + msg.Err)
+			m.focus = FocusDialog
+		} else {
+			state := "removed from"
+			if msg.Favorite {
+				state = "added to"
+			}
+			m.chat = m.chat.SetStatusMsg(msg.JID + " " + state + " favorites")
+		}
+
+		m.refreshRosterContacts()
+		if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
+			contactData := m.getContactDetailData(m.detailContactJID)
+			m.chat = m.chat.SetContactData(&contactData)
 		}
 
 	case dialogs.CancelOperationMsg:
@@ -920,6 +974,44 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 			m.app.OperationTimeout(dialogs.OpAddContact, 30),
 		)
 
+	case keybindings.ActionToggleFavorite:
+		targetJID := ""
+		// When roster is focused, always prefer the actual roster selection.
+		if m.focus == FocusRoster && m.roster.FocusSection() == roster.SectionContacts {
+			targetJID = m.roster.SelectedJID()
+		} else if m.focus == FocusChat && m.windows.ActiveJID() != "" {
+			targetJID = m.windows.ActiveJID()
+		} else if m.viewMode == ViewModeContactDetails && m.detailContactJID != "" {
+			targetJID = m.detailContactJID
+		} else if jid := m.roster.SelectedJID(); jid != "" {
+			targetJID = jid
+		}
+		if targetJID == "" {
+			m.chat = m.chat.SetStatusMsg("Select a contact to toggle favorite")
+			return nil
+		}
+
+		targetAccount := m.rosterAccountJID()
+		if targetAccount == "" {
+			m.dialog = m.dialog.ShowError("Select an account first.")
+			m.focus = FocusDialog
+			return nil
+		}
+
+		// Ensure we are not stuck in filter input state when toggling favorite.
+		if m.roster.InFilterMode() {
+			m.roster = m.roster.ExitFilterMode()
+			m.keys.SetMode(keybindings.ModeNormal)
+		}
+
+		// Show roster loading spinner while favorite is persisted.
+		m.rosterLoadingByAccount[localRosterOpKey] = true
+		m.roster = m.roster.SetLoading(true)
+		return tea.Batch(
+			rosterSpinnerTick(),
+			m.doToggleFavorite(targetAccount, targetJID),
+		)
+
 	case keybindings.ActionJoinRoom:
 		m.dialog = m.dialog.ShowJoinRoom()
 		m.focus = FocusDialog
@@ -1144,6 +1236,7 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 					m.windows = m.windows.SetAccountForActive("")
 					m.refreshRosterContacts()
 					m.resetDetailViewState()
+					m.loadActiveWindow()
 					m.chat = m.chat.SetStatusMsg("No account selected")
 					return nil
 				}
@@ -1330,9 +1423,10 @@ func (m *Model) handleAction(action keybindings.Action, msg tea.KeyMsg) tea.Cmd 
 		if m.focus == FocusRoster {
 			if m.roster.InFilterMode() {
 				m.roster = m.roster.ExitFilterMode()
+				m.keys.SetMode(keybindings.ModeNormal)
 			} else {
 				m.roster = m.roster.EnterFilterMode()
-				m.keys.SetMode(keybindings.ModeInsert)
+				m.keys.SetMode(keybindings.ModeNormal)
 			}
 		}
 
@@ -1911,6 +2005,24 @@ func (m *Model) executeCommand(cmd string, args []string) tea.Cmd {
 	return m.app.ExecuteCommand(cmd, args)
 }
 
+func (m *Model) doToggleFavorite(accountJID, contactJID string) tea.Cmd {
+	return func() tea.Msg {
+		newState, err := m.app.ToggleContactFavoriteForAccount(accountJID, contactJID)
+		if err != nil {
+			return favoriteToggleResultMsg{
+				AccountJID: accountJID,
+				JID:        contactJID,
+				Err:        err.Error(),
+			}
+		}
+		return favoriteToggleResultMsg{
+			AccountJID: accountJID,
+			JID:        contactJID,
+			Favorite:   newState,
+		}
+	}
+}
+
 // openChat opens a chat window for the given JID
 func (m *Model) openChat(jid string) {
 	accountJID := m.windows.GetActiveAccountJID()
@@ -1955,12 +2067,23 @@ func (m *Model) loadActiveWindow() {
 		m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(accountJID))
 	}
 
+	// When no account is selected for the active context, hide chat content.
+	if m.rosterAccountJID() == "" {
+		m.chat = m.chat.SetJID("")
+		m.chat = m.chat.SetHistory(nil)
+		m.chat = m.chat.SetContactData(nil)
+		m.chat = m.chat.SetInfoExpanded(false)
+		m.refreshRosterContacts()
+		return
+	}
+
 	jid := m.windows.ActiveJID()
 	if jid != "" {
 		m.windows = m.windows.ClearUnread(m.windows.ActiveNum())
 		if accountJID != "" {
 			m.app.ClearContactUnread(accountJID, jid)
-			m.roster = m.roster.SetContacts(m.app.GetContactsForAccount(accountJID))
+			m.app.TouchContactInteractionForAccount(accountJID, jid, time.Now())
+			m.refreshRosterContacts()
 		}
 		history := m.app.GetChatHistory(jid)
 		contactData := m.getContactDetailData(jid)
@@ -2029,7 +2152,7 @@ func (m *Model) rosterAccountJID() string {
 func (m *Model) currentRosterContacts() []roster.Roster {
 	accountJID := m.rosterAccountJID()
 	if accountJID == "" {
-		return m.app.GetContacts()
+		return nil
 	}
 	return m.app.GetContactsForAccount(accountJID)
 }
@@ -2762,6 +2885,7 @@ func (m *Model) getContactDetailData(jid string) chat.ContactDetailData {
 				Groups:        c.Groups,
 				Subscription:  c.Subscription,
 				AddedToRoster: c.AddedToRoster,
+				Favorite:      c.Favorite,
 				StatusSharing: m.app.IsStatusSharingEnabled(jid),
 				OMEMOEnabled:  true, // TODO: Get from contact settings
 				// Fingerprints would be populated from OMEMO storage

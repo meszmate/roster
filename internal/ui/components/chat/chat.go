@@ -1051,6 +1051,7 @@ type ContactDetailData struct {
 	Groups        []string
 	Subscription  string
 	AddedToRoster bool
+	Favorite      bool
 	MyPresence    string // Your custom presence for this contact (empty = default)
 	MyPresenceMsg string
 	LastSeen      time.Time
@@ -1271,6 +1272,12 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 		b.WriteString(m.styles.ChatSystem.Render("  (Incoming chat only. Press A to add to roster.)") + "\n")
 	}
 
+	favoriteStr := "[OFF]"
+	if contact.Favorite {
+		favoriteStr = m.styles.PresenceOnline.Render("[ON]")
+	}
+	b.WriteString(fmt.Sprintf("  Favorite: %s\n", favoriteStr))
+
 	b.WriteString("\n")
 
 	// Status sharing toggle
@@ -1333,7 +1340,7 @@ func (m Model) RenderContactDetails(contact ContactDetailData) string {
 	// Actions hint at bottom
 	b.WriteString(strings.Repeat("─", m.width-2))
 	b.WriteString("\n")
-	actions := "  [E] Edit  [Enter] Chat  [S] Toggle Sharing  [V] Verify"
+	actions := "  [E] Edit  [Enter] Chat  [F] Favorite  [S] Toggle Sharing  [V] Verify"
 	if !contact.AddedToRoster {
 		actions += "  [A] Add to roster"
 	}

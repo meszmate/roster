@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -227,6 +228,10 @@ type App struct {
 	// Per-account contact unread tracking: accountJID -> contactJID -> unread count
 	contactUnreads map[string]map[string]int
 
+	// Per-account contact metadata
+	contactFavorites       map[string]map[string]bool  // accountJID -> contactJID -> favorite
+	contactLastInteraction map[string]map[string]int64 // accountJID -> contactJID -> unix timestamp
+
 	// Status sharing state: contactJID -> enabled (true = sharing status with contact)
 	statusSharing map[string]bool
 
@@ -271,20 +276,22 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	app := &App{
-		cfg:             cfg,
-		accounts:        accounts,
-		events:          make(chan EventMsg, 100),
-		ctx:             ctx,
-		cancel:          cancel,
-		status:          "offline",
-		chatHistory:     make(map[string][]chat.Message),
-		accountStatuses: make(map[string]string),
-		accountUnreads:  make(map[string]int),
-		clients:         make(map[string]*client.Client),
-		contactUnreads:  make(map[string]map[string]int),
-		statusSharing:   make(map[string]bool),
-		pendingOps:      make(map[dialogs.OperationType]context.CancelFunc),
-		storage:         storage,
+		cfg:                    cfg,
+		accounts:               accounts,
+		events:                 make(chan EventMsg, 100),
+		ctx:                    ctx,
+		cancel:                 cancel,
+		status:                 "offline",
+		chatHistory:            make(map[string][]chat.Message),
+		accountStatuses:        make(map[string]string),
+		accountUnreads:         make(map[string]int),
+		clients:                make(map[string]*client.Client),
+		contactUnreads:         make(map[string]map[string]int),
+		contactFavorites:       map[string]map[string]bool{},
+		contactLastInteraction: map[string]map[string]int64{},
+		statusSharing:          make(map[string]bool),
+		pendingOps:             make(map[dialogs.OperationType]context.CancelFunc),
+		storage:                storage,
 	}
 
 	// Restore cached roster and unread state so UI has immediate data before
@@ -509,6 +516,7 @@ func (a *App) restorePersistedState() {
 		}
 		a.loadRosterCacheForAccount(acc.JID)
 		a.loadUnreadStateForAccount(acc.JID)
+		a.loadContactMetadataForAccount(acc.JID)
 	}
 }
 
@@ -527,14 +535,151 @@ func (a *App) ensureAccountStateLoaded(accountJID string) {
 	}
 	_, hasUnreadMap := a.contactUnreads[accountJID]
 	hasAnyUnread := a.accountUnreads[accountJID] > 0
+	_, hasFavorites := a.contactFavorites[accountJID]
+	_, hasInteraction := a.contactLastInteraction[accountJID]
 	a.mu.RUnlock()
 
-	if hasRoster || hasUnreadMap || hasAnyUnread {
+	if !hasFavorites || !hasInteraction {
+		a.loadContactMetadataForAccount(accountJID)
+	}
+	if !hasRoster && !hasUnreadMap && !hasAnyUnread {
+		a.loadRosterCacheForAccount(accountJID)
+		a.loadUnreadStateForAccount(accountJID)
+	}
+}
+
+func contactFavoritesStateKey(accountJID string) string {
+	return "contacts:favorites:" + accountJID
+}
+
+func contactInteractionStateKey(accountJID string) string {
+	return "contacts:last_interaction:" + accountJID
+}
+
+func (a *App) loadContactMetadataForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
 		return
 	}
 
-	a.loadRosterCacheForAccount(accountJID)
-	a.loadUnreadStateForAccount(accountJID)
+	favorites := make(map[string]bool)
+	if raw, err := a.storage.GetAppState(contactFavoritesStateKey(accountJID)); err == nil && raw != "" {
+		var list []string
+		if err := json.Unmarshal([]byte(raw), &list); err == nil {
+			for _, jid := range list {
+				if jid == "" {
+					continue
+				}
+				favorites[jid] = true
+			}
+		}
+	}
+
+	lastInteraction := make(map[string]int64)
+	if raw, err := a.storage.GetAppState(contactInteractionStateKey(accountJID)); err == nil && raw != "" {
+		_ = json.Unmarshal([]byte(raw), &lastInteraction)
+	}
+
+	a.mu.Lock()
+	a.contactFavorites[accountJID] = favorites
+	a.contactLastInteraction[accountJID] = lastInteraction
+	a.mu.Unlock()
+}
+
+func (a *App) saveContactMetadataForAccount(accountJID string) {
+	if a.storage == nil || accountJID == "" {
+		return
+	}
+
+	a.mu.RLock()
+	favSet := a.contactFavorites[accountJID]
+	interactionMap := a.contactLastInteraction[accountJID]
+	favorites := make([]string, 0, len(favSet))
+	for jid, on := range favSet {
+		if on {
+			favorites = append(favorites, jid)
+		}
+	}
+	sort.Strings(favorites)
+	interactionCopy := make(map[string]int64, len(interactionMap))
+	for jid, ts := range interactionMap {
+		interactionCopy[jid] = ts
+	}
+	a.mu.RUnlock()
+
+	favoritesJSON, err := json.Marshal(favorites)
+	if err == nil {
+		_ = a.storage.SetAppState(contactFavoritesStateKey(accountJID), string(favoritesJSON))
+	}
+	interactionsJSON, err := json.Marshal(interactionCopy)
+	if err == nil {
+		_ = a.storage.SetAppState(contactInteractionStateKey(accountJID), string(interactionsJSON))
+	}
+}
+
+func (a *App) IsContactFavoriteForAccount(accountJID, contactJID string) bool {
+	if accountJID == "" || contactJID == "" {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if favs, ok := a.contactFavorites[accountJID]; ok {
+		return favs[contactJID]
+	}
+	return false
+}
+
+func (a *App) ToggleContactFavoriteForAccount(accountJID, contactJID string) (bool, error) {
+	accountJID = strings.TrimSpace(accountJID)
+	contactJID = strings.TrimSpace(contactJID)
+	if accountJID == "" {
+		return false, fmt.Errorf("no account selected")
+	}
+	if contactJID == "" {
+		return false, fmt.Errorf("no contact selected")
+	}
+
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+
+	a.mu.Lock()
+	if a.contactFavorites[accountJID] == nil {
+		a.contactFavorites[accountJID] = make(map[string]bool)
+	}
+	newState := !a.contactFavorites[accountJID][contactJID]
+	a.contactFavorites[accountJID][contactJID] = newState
+	a.mu.Unlock()
+
+	a.saveContactMetadataForAccount(accountJID)
+	a.sendEvent(EventMsg{Type: EventRosterUpdate})
+
+	return newState, nil
+}
+
+func (a *App) TouchContactInteractionForAccount(accountJID, contactJID string, at time.Time) {
+	accountJID = strings.TrimSpace(accountJID)
+	contactJID = strings.TrimSpace(contactJID)
+	if accountJID == "" || contactJID == "" {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	if parsed, err := jid.Parse(contactJID); err == nil {
+		contactJID = parsed.Bare().String()
+	}
+
+	unix := at.Unix()
+	a.mu.Lock()
+	if a.contactLastInteraction[accountJID] == nil {
+		a.contactLastInteraction[accountJID] = make(map[string]int64)
+	}
+	if unix > a.contactLastInteraction[accountJID][contactJID] {
+		a.contactLastInteraction[accountJID][contactJID] = unix
+	}
+	a.mu.Unlock()
+
+	a.saveContactMetadataForAccount(accountJID)
 }
 
 func (a *App) loadRosterCacheForAccount(accountJID string) {
@@ -811,6 +956,8 @@ func (a *App) AddChatMessageForAccount(accountJID, jid string, msg chat.Message)
 		)
 	}
 
+	a.TouchContactInteractionForAccount(accountJID, jid, msg.Timestamp)
+
 	a.sendEvent(EventMsg{Type: EventMessage, Data: ChatMessage{
 		AccountJID:  accountJID,
 		ID:          msg.ID,
@@ -883,6 +1030,8 @@ func (a *App) SendChatMessage(to, body string) tea.Cmd {
 			Outgoing:   localMsg.Outgoing,
 			Status:     MessageStatus(localMsg.Status),
 		}})
+
+		a.TouchContactInteractionForAccount(currentAccount, to, timestamp)
 
 		// Persist to database if enabled
 		if a.storage != nil && a.cfg.Storage.SaveMessages {
@@ -1460,6 +1609,8 @@ func (a *App) RemoveAccount(jid string) {
 	delete(a.accountStatuses, jid)
 	delete(a.accountUnreads, jid)
 	delete(a.contactUnreads, jid)
+	delete(a.contactFavorites, jid)
+	delete(a.contactLastInteraction, jid)
 
 	filtered := make([]roster.Roster, 0, len(a.rosters))
 	for _, r := range a.rosters {
@@ -1478,6 +1629,10 @@ func (a *App) RemoveAccount(jid string) {
 
 	a.sendEvent(EventMsg{Type: EventRosterUpdate})
 	a.sendEvent(EventMsg{Type: EventPresence})
+	if a.storage != nil {
+		_ = a.storage.DeleteAppState(contactFavoritesStateKey(jid))
+		_ = a.storage.DeleteAppState(contactInteractionStateKey(jid))
+	}
 }
 
 // SetDefaultAccount sets the default account
@@ -2777,6 +2932,9 @@ func (a *App) GetContactsForAccount(accountJID string) []roster.Roster {
 			if contactUnreads, ok := a.contactUnreads[out[i].AccountJID]; ok {
 				out[i].Unread = contactUnreads[out[i].JID]
 			}
+			if favs, ok := a.contactFavorites[out[i].AccountJID]; ok {
+				out[i].Favorite = favs[out[i].JID]
+			}
 			out[i].StatusHidden = !a.IsStatusSharingEnabled(out[i].JID)
 		}
 		return out // Return all if no account specified
@@ -2789,10 +2947,47 @@ func (a *App) GetContactsForAccount(accountJID string) []roster.Roster {
 			if contactUnreads, ok := a.contactUnreads[accountJID]; ok {
 				entry.Unread = contactUnreads[r.JID]
 			}
+			if favs, ok := a.contactFavorites[accountJID]; ok {
+				entry.Favorite = favs[r.JID]
+			}
 			entry.StatusHidden = !a.IsStatusSharingEnabled(r.JID)
 			filtered = append(filtered, entry)
 		}
 	}
+
+	lastInteraction := a.contactLastInteraction[accountJID]
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].Favorite != filtered[j].Favorite {
+			return filtered[i].Favorite
+		}
+
+		var ti, tj int64
+		if lastInteraction != nil {
+			ti = lastInteraction[filtered[i].JID]
+			tj = lastInteraction[filtered[j].JID]
+		}
+		if ti != tj {
+			return ti > tj
+		}
+
+		if filtered[i].Unread != filtered[j].Unread {
+			return filtered[i].Unread > filtered[j].Unread
+		}
+
+		ni := strings.ToLower(strings.TrimSpace(filtered[i].Name))
+		nj := strings.ToLower(strings.TrimSpace(filtered[j].Name))
+		if ni == "" {
+			ni = strings.ToLower(filtered[i].JID)
+		}
+		if nj == "" {
+			nj = strings.ToLower(filtered[j].JID)
+		}
+		if ni == nj {
+			return filtered[i].JID < filtered[j].JID
+		}
+		return ni < nj
+	})
+
 	return filtered
 }
 

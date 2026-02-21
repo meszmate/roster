@@ -2,6 +2,7 @@ package roster
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,7 @@ type Roster struct {
 	Status        string // online, away, dnd, xa, offline
 	StatusMsg     string
 	Unread        int
+	Favorite      bool
 	AccountJID    string // Which account owns this contact
 	AddedToRoster bool   // True when this entry comes from roster management, false when discovered from incoming chat only
 	StatusHidden  bool   // True if we don't share status with this contact
@@ -143,7 +145,17 @@ func (m Model) SetContacts(rosters []Roster) Model {
 
 // SetRosters sets the roster entries
 func (m Model) SetRosters(rosters []Roster) Model {
-	m.rosters = rosters
+	sorted := make([]Roster, len(rosters))
+	copy(sorted, rosters)
+	// Keep existing order within each bucket, but always render favorites first.
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Favorite == sorted[j].Favorite {
+			return false
+		}
+		return sorted[i].Favorite
+	})
+
+	m.rosters = sorted
 	m.groups = make(map[string][]Roster)
 
 	// Group rosters
@@ -706,6 +718,8 @@ func (m Model) View() string {
 			"",
 			"Quick Keys:",
 			"  ga  Add to roster",
+			"  F   Toggle favorite",
+			"  gf  Filter contacts",
 			"  gj  Join room",
 			"  gs  Settings",
 			"  :1  Window 1",
@@ -1110,6 +1124,13 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 		sourceTagStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	}
 	sourceTag := sourceTagStyle.Render(sourceTagText)
+	favoriteSymbol := "☆"
+	favoriteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	if r.Favorite {
+		favoriteSymbol = "★"
+		favoriteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	}
+	favoriteTag := favoriteStyle.Render(favoriteSymbol)
 
 	// Build status suffix for non-online entries with status message
 	statusSuffix := ""
@@ -1138,7 +1159,8 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 	// Reserve: indicator + source-tag + padding + unread length
 	unreadLen := len(unread)
 	sourceTagLen := len(sourceTagText) + 1
-	maxWidth := m.width - 5 - unreadLen - sourceTagLen // presence + tag + padding + unread
+	favoriteLen := 2                                                 // symbol + following space
+	maxWidth := m.width - 5 - unreadLen - sourceTagLen - favoriteLen // presence + tags + padding + unread
 	if maxWidth < 5 {
 		maxWidth = 5
 	}
@@ -1170,10 +1192,11 @@ func (m Model) renderRoster(r Roster, selected bool) string {
 
 	// Build the content
 	var content string
+	favoritePrefix := favoriteTag + " "
 	if r.Unread > 0 {
-		content = fmt.Sprintf(" %s %s %s%s", presence, sourceTag, displayText, m.styles.RosterUnread.Render(unread))
+		content = fmt.Sprintf(" %s %s %s%s%s", presence, sourceTag, favoritePrefix, displayText, m.styles.RosterUnread.Render(unread))
 	} else {
-		content = fmt.Sprintf(" %s %s %s", presence, sourceTag, displayText)
+		content = fmt.Sprintf(" %s %s %s%s", presence, sourceTag, favoritePrefix, displayText)
 	}
 
 	return style.Width(m.width - 2).Render(content)
